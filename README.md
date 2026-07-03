@@ -16,15 +16,17 @@ Autoseller for XyraNet Wholesale API with Plati.Market/Digiseller and GGsel inte
 
 ## Quick Ubuntu Install
 
-After publishing the repository to GitHub:
+Public repository one-command install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install-linux.sh | sudo env REPO_URL=https://github.com/OWNER/REPO.git bash
+curl -fsSL https://raw.githubusercontent.com/Seno47/vpn-reseller-autoseller/main/scripts/install-linux.sh | sudo env REPO_URL=https://github.com/Seno47/vpn-reseller-autoseller.git bash
 ```
 
-From a cloned repository:
+For a private repository, clone it first with an authorized GitHub account, then run:
 
 ```bash
+git clone https://github.com/Seno47/vpn-reseller-autoseller.git
+cd vpn-reseller-autoseller
 sudo bash scripts/install-linux.sh
 ```
 

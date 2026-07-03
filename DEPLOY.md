@@ -20,15 +20,16 @@ If Telegram is blocked or unavailable, the web panel and marketplace processing 
 
 ## Fast Ubuntu install
 
-After the repository is on GitHub, the one-command install form is:
+For a public repository, the one-command install form is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install-linux.sh | sudo env REPO_URL=https://github.com/OWNER/REPO.git bash
+curl -fsSL https://raw.githubusercontent.com/Seno47/vpn-reseller-autoseller/main/scripts/install-linux.sh | sudo env REPO_URL=https://github.com/Seno47/vpn-reseller-autoseller.git bash
 ```
 
-If you already cloned the repository:
+For a private repository, clone it first with an authorized GitHub account:
 
 ```bash
+git clone https://github.com/Seno47/vpn-reseller-autoseller.git
 cd vpn-reseller-autoseller
 sudo bash scripts/install-linux.sh
 ```
