@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XyraNet Reseller</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260704-2">
+</head>
+<body>
+  <section class="login-screen" id="loginScreen">
+    <form class="login-box" id="loginForm">
+      <div>
+        <h1>XyraNet Reseller</h1>
+        <p>Вход в админ-панель автопродаж</p>
+      </div>
+      <label>Логин<input name="username" autocomplete="username" required></label>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Войти</button>
+      <p class="login-error" id="loginError"></p>
+    </form>
+  </section>
+
+  <main class="shell">
+    <section class="topbar">
+      <div>
+        <h1>XyraNet Reseller</h1>
+        <p>Webhook-выдача VPN-доступов через Wholesale API</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="refreshButton" class="secondary" type="button">Обновить</button>
+        <button id="logoutButton" type="button">Выйти</button>
+      </div>
+    </section>
+
+    <section class="metrics" id="metrics"></section>
+
+    <nav class="section-tabs" aria-label="Разделы панели">
+      <button class="active" data-section-tab="mapping" type="button">Маппинг</button>
+      <button data-section-tab="templates" type="button">Шаблоны</button>
+      <button data-section-tab="variables" type="button">Переменные</button>
+      <button data-section-tab="statistics" type="button">Статистика</button>
+      <button data-section-tab="settings" type="button">Настройки</button>
+      <button data-section-tab="sales" type="button">Продажи</button>
+    </nav>
+
+    <section class="app-section active" data-section="mapping">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Новый / редактируемый маппинг</h2>
+      </div>
+      <form id="productForm" class="grid-form product-grid">
+        <label class="mapping-source-field">Ссылка / данные лота
+          <textarea id="mappingSource" rows="2" placeholder="Вставьте ссылку Plati/GGsel, JSON payload или id_goods=5968452&variant_id=42"></textarea>
+          <small id="mappingParseStatus">Поля лота и варианта можно заполнить автоматически</small>
+        </label>
+        <div class="mapping-source-actions">
+          <button id="parseMappingButton" class="secondary" type="button">Распарсить</button>
+        </div>
+        <label class="mapping-marketplace-field">Площадка
+          <select name="marketplace" required>
+            <option value="plati">Plati.Market</option>
+            <option value="digiseller">Digiseller</option>
+            <option value="ggsel">GGsel</option>
+          </select>
+        </label>
+        <label class="mapping-lot-field">ID лота<input name="external_product_id" placeholder="offer-9" required></label>
+        <label class="variant-field">Кнопка / вариант
+          <input id="variantSearch" name="external_variant_id" autocomplete="off" placeholder="Выберите кнопку или вставьте variant_id">
+          <div id="variantDropdown" class="variant-dropdown hidden"></div>
+          <small id="variantHint">Если у лота есть кнопки, они появятся после парсинга</small>
+        </label>
+        <label class="mapping-action-field">Действие
+          <select name="action">
+            <option value="create">Новая подписка</option>
+            <option value="renew">Продление</option>
+            <option value="reissue">Перевыпуск</option>
+            <option value="traffic">LTE-трафик</option>
+            <option value="ip_limit">IP-лимит</option>
+          </select>
+        </label>
+        <div class="mapping-params-field hidden" id="actionParamsField">
+          <span id="actionParamsTitle">Параметры</span>
+          <div class="action-param-grid">
+            <label id="actionParamAmountField">Объём
+              <input id="actionParamAmount" inputmode="decimal" min="1" step="1" placeholder="10">
+            </label>
+            <label class="check-row hidden" id="actionParamFullPeriodField">
+              <input id="actionParamFullPeriod" type="checkbox">
+              <span>На весь срок подписки</span>
+            </label>
+            <label class="hidden" id="actionParamMonthsField">Месяцев
+              <input id="actionParamMonths" inputmode="numeric" min="1" step="1" value="1" placeholder="1">
+            </label>
+          </div>
+          <input name="action_params_text" type="hidden">
+          <small id="actionParamsHint"></small>
+        </div>
+        <label class="tariff-field">Тариф
+          <input id="tariffSearch" autocomplete="off" placeholder="Начните вводить lite, pro, 30 дн..." required>
+          <input id="tariffCode" name="tariff_code" type="hidden">
+          <div id="tariffDropdown" class="tariff-dropdown hidden"></div>
+          <small id="tariffHint">Выберите тариф из списка</small>
+        </label>
+        <label class="mapping-title-field">Название<input name="title" placeholder="Lite 1 month"></label>
+        <input id="mappingDeliveryTemplate" name="delivery_template" type="hidden">
+        <div class="mapping-form-actions">
+          <button type="submit">Сохранить</button>
+          <button id="resetMappingButton" class="secondary" type="button">Очистить</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Готовый маппинг</h2>
+        <label class="search-field">Поиск
+          <input id="mappingSearch" placeholder="Площадка, лот, вариант, тариф, название">
+        </label>
+      </div>
+      <div class="table-wrap scroll-card">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Площадка</th><th>Лот</th><th>Вариант</th><th>Тариф</th><th>Статус</th><th>Действия</th></tr>
+          </thead>
+          <tbody id="products"></tbody>
+        </table>
+      </div>
+    </section>
+    </section>
+
+    <section class="app-section" data-section="templates">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Шаблоны выдачи</h2>
+        </div>
+        <div class="template-layout">
+          <label>Вид действия
+            <select id="templateActionSelect"></select>
+          </label>
+          <label>Этап сообщения
+            <select id="templateStageSelect"></select>
+          </label>
+          <label id="templateCommandField">Команда
+            <input id="templateCommandInput" placeholder="!renew">
+            <small>Команда, которую ждём в чате для этого сценария</small>
+          </label>
+          <div class="template-editor">
+            <div class="template-head">
+              <span>Текст сообщения</span>
+              <div class="panel-actions">
+                <button id="defaultTemplateButton" class="secondary" type="button">Вставить стандартный</button>
+                <button id="clearTemplateButton" class="secondary" type="button">Сбросить</button>
+                <button id="saveTemplateButton" type="button">Сохранить шаблон</button>
+              </div>
+            </div>
+            <textarea id="deliveryTemplate" rows="13" placeholder="Пусто = стандартное сообщение"></textarea>
+            <div id="templateVariableButtons" class="variable-buttons"></div>
+            <small>Переменные можно вставлять кнопками и удалять обычным текстом. Поддерживается формат {ORDER_ID} и старый ${order_id}.</small>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="app-section" data-section="variables">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Составные переменные</h2>
+        </div>
+        <div class="variable-editor-layout">
+          <section class="variable-list-panel">
+            <label>Переменная
+              <select id="complexVariableSelect"></select>
+            </label>
+            <div class="panel-actions">
+              <button id="newComplexVariableButton" class="secondary" type="button">Новая</button>
+              <button id="deleteComplexVariableButton" class="danger" type="button">Удалить</button>
+            </div>
+            <p class="notice" id="complexVariableInfo"></p>
+          </section>
+          <section class="variable-compose-panel">
+            <div class="variable-meta-grid">
+              <label>Имя токена
+                <input id="complexVariableKey" placeholder="CUSTOM_HELP">
+                <small>Используйте латиницу, цифры и подчёркивание. В шаблонах вставляется как {CUSTOM_HELP}.</small>
+              </label>
+              <label>Название
+                <input id="complexVariableLabel" placeholder="Моя подсказка">
+                <small>Только для удобства в панели.</small>
+              </label>
+            </div>
+            <div class="template-editor">
+              <div class="template-head">
+                <span>Шаблон переменной</span>
+                <div class="panel-actions">
+                  <button id="defaultComplexVariableButton" class="secondary" type="button">Вставить стандартный</button>
+                  <button id="clearComplexVariableButton" class="secondary" type="button">Сбросить</button>
+                  <button id="saveComplexVariableButton" type="button">Сохранить переменную</button>
+                </div>
+              </div>
+              <textarea id="complexVariableTemplate" rows="12" placeholder="Например: 🔑 ID заказа: {ORDER_ID}"></textarea>
+              <div id="complexVariableButtons" class="variable-buttons"></div>
+              <small>Здесь можно собирать большой блок из обычных переменных. После сохранения новый токен появится в редакторе шаблонов.</small>
+            </div>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section class="app-section" data-section="settings">
+    <section class="two-column">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Настройки</h2>
+          <div class="panel-actions">
+            <button id="restartTelegramButton" class="secondary" type="button">Перезапустить Telegram-бота</button>
+          </div>
+        </div>
+        <p class="notice" id="telegramRestartStatus"></p>
+        <form id="settingsForm" class="settings-form"></form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Доступ к боту</h2>
+        </div>
+        <form id="botUserForm" class="inline-form">
+          <label>Telegram ID<input name="telegram_id" inputmode="numeric" placeholder="1606617935" required></label>
+          <label>Подпись<input name="label" placeholder="Менеджер"></label>
+          <button type="submit">Добавить</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Telegram ID</th><th>Подпись</th><th>Источник</th><th>Действие</th></tr></thead>
+            <tbody id="botUsers"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+    </section>
+
+    <section class="app-section" data-section="statistics">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Статистика</h2>
+          <label class="period-field">Период
+            <select id="statisticsPeriod">
+              <option value="today">Сегодня</option>
+              <option value="yesterday">Вчера</option>
+              <option value="7d">7 дней</option>
+              <option value="30d" selected>30 дней</option>
+              <option value="90d">90 дней</option>
+              <option value="all">Всё время</option>
+            </select>
+          </label>
+        </div>
+        <div class="stat-grid" id="statisticsMetrics"></div>
+      </section>
+      <section class="two-column stats-columns">
+        <section class="panel">
+          <div class="panel-head"><h2>По площадкам</h2></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Площадка</th><th>Продаж</th><th>Сумма</th><th>Расход</th><th>Прибыль</th></tr></thead>
+              <tbody id="statisticsMarketplaces"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>По действиям</h2></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Действие</th><th>Продаж</th><th>Сумма</th><th>Расход</th><th>Прибыль</th></tr></thead>
+              <tbody id="statisticsActions"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+      <section class="two-column stats-columns">
+        <section class="panel">
+          <div class="panel-head"><h2>Тарифы</h2></div>
+          <div class="table-wrap scroll-card">
+            <table>
+              <thead><tr><th>Тариф</th><th>Продаж</th><th>Сумма</th><th>Расход</th><th>Прибыль</th></tr></thead>
+              <tbody id="statisticsTariffs"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Динамика</h2></div>
+          <div class="table-wrap scroll-card">
+            <table>
+              <thead><tr><th>День</th><th>Продаж</th><th>Сумма</th><th>Расход</th><th>Прибыль</th></tr></thead>
+              <tbody id="statisticsDays"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </section>
+
+    <section class="app-section" data-section="sales">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Последние продажи</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Площадка</th><th>Заказ</th><th>Лот</th><th>Вариант</th><th>XyraNet</th><th>Дата</th></tr></thead>
+          <tbody id="sales"></tbody>
+        </table>
+      </div>
+    </section>
+    </section>
+  </main>
+  <script src="/static/app.js?v=20260704-2"></script>
+</body>
+</html>
