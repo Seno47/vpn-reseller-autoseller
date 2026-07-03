@@ -100,6 +100,28 @@ def expense_from_raw_response(raw_response: Any) -> Decimal:
     return _money_from_node(raw_response)
 
 
+def expense_known_from_raw_response(raw_response: Any) -> bool:
+    if isinstance(raw_response, str):
+        if not raw_response.strip():
+            return False
+        try:
+            raw_response = json.loads(raw_response)
+        except ValueError:
+            return False
+    return _money_key_exists(raw_response)
+
+
+def _money_key_exists(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_money_key_exists(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    lowered = {str(key).lower(): item for key, item in value.items()}
+    if any(key in lowered and not isinstance(lowered[key], (dict, list)) for key in MONEY_KEYS):
+        return True
+    return any(_money_key_exists(item) for item in value.values() if isinstance(item, (dict, list)))
+
+
 def _money_from_node(value: Any) -> Decimal:
     if isinstance(value, list):
         return sum((_money_from_node(item) for item in value), Decimal("0"))
@@ -150,10 +172,11 @@ def empty_group() -> dict[str, Any]:
         "pending_count": 0,
         "revenue_by_currency": defaultdict(Decimal),
         "expense_rub": Decimal("0"),
+        "expense_unknown_count": 0,
     }
 
 
-def add_to_group(group: dict[str, Any], *, delivered: bool, amount: Decimal, currency: str, expense: Decimal) -> None:
+def add_to_group(group: dict[str, Any], *, delivered: bool, amount: Decimal, currency: str, expense: Decimal, expense_known: bool) -> None:
     group["sales_count"] += 1
     if delivered:
         group["delivered_count"] += 1
@@ -162,6 +185,8 @@ def add_to_group(group: dict[str, Any], *, delivered: bool, amount: Decimal, cur
     if amount:
         group["revenue_by_currency"][currency] += amount
     group["expense_rub"] += expense
+    if delivered and not expense_known:
+        group["expense_unknown_count"] += 1
 
 
 def finalize_group(key: str, label: str, group: dict[str, Any]) -> dict[str, Any]:
@@ -179,6 +204,7 @@ def finalize_group(key: str, label: str, group: dict[str, Any]) -> dict[str, Any
         "expense_rub": money_payload(expense),
         "profit_rub": money_payload(profit),
         "margin_percent": pct(profit, revenue_rub),
+        "expense_unknown_count": group["expense_unknown_count"],
     }
 
 
@@ -201,14 +227,16 @@ def build_sales_statistics(rows: list[dict[str, Any]], *, period: str = "30d") -
         amount = parse_decimal(row.get("amount"))
         currency = normalize_currency(row.get("currency"))
         delivered = bool(row.get("delivery_id") or row.get("xyranet_order_id"))
-        expense = expense_from_raw_response(row.get("delivery_raw_response") or row.get("raw_response") or "")
+        raw_response = row.get("delivery_raw_response") or row.get("raw_response") or ""
+        expense = expense_from_raw_response(raw_response)
+        expense_known = expense_known_from_raw_response(raw_response)
         action = str(row.get("product_action") or "create")
         marketplace = str(row.get("marketplace") or "unknown")
         tariff = str(row.get("delivered_tariff_code") or row.get("tariff_code") or "unknown")
         day = created_at.astimezone().date().isoformat()
 
         for group in (total, marketplaces[marketplace], actions[action], tariffs[tariff], days[day]):
-            add_to_group(group, delivered=delivered, amount=amount, currency=currency, expense=expense)
+            add_to_group(group, delivered=delivered, amount=amount, currency=currency, expense=expense, expense_known=expense_known)
 
     revenue_rub = total["revenue_by_currency"].get("RUB", Decimal("0"))
     expense = total["expense_rub"]
@@ -233,6 +261,7 @@ def build_sales_statistics(rows: list[dict[str, Any]], *, period: str = "30d") -
             "profit_rub": money_payload(profit),
             "margin_percent": pct(profit, revenue_rub),
             "avg_order_rub": money_payload(avg_order),
+            "expense_unknown_count": total["expense_unknown_count"],
         },
         "marketplaces": sorted(
             (finalize_group(item_key, item_key, group) for item_key, group in marketplaces.items()),

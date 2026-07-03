@@ -39,6 +39,18 @@ button.secondary {
   color: var(--ink);
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  border-radius: 6px;
+  padding: 0 13px;
+  background: #e9eef5;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.65;
@@ -221,6 +233,13 @@ p {
 
 .stats-columns .panel {
   margin-top: 0;
+}
+
+.event-filters {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(180px, 260px) auto;
+  align-items: end;
+  gap: 10px;
 }
 
 .panel {
@@ -600,7 +619,8 @@ small {
   .variable-editor-layout,
   .variable-meta-grid,
   .settings-form,
-  .inline-form {
+  .inline-form,
+  .event-filters {
     grid-template-columns: 1fr;
   }
 

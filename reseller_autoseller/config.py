@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     database_path: str = "data/reseller.sqlite3"
     enable_telegram: bool = True
+    notify_new_purchases: bool = True
+    notify_chat_messages: bool = True
+    notify_errors: bool = True
+    notify_pending: bool = True
+    notify_daily_statistics: bool = False
     free_reissue_enabled: bool = True
     log_level: str = "INFO"
 

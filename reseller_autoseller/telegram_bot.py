@@ -109,6 +109,7 @@ SETTING_GROUPS = [
     ("🔌 XyraNet", ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
     ("🛒 Маркетплейсы", ["marketplace_webhook_secret", "digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
     ("🤖 Telegram", ["enable_telegram", "telegram_bot_token"]),
+    ("🔔 Уведомления", ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
     ("🛡 Веб-панель", ["app_base_url", "admin_username", "admin_password"]),
 ]
 
@@ -124,6 +125,11 @@ SETTING_ICONS = {
     "ggsel_api_key": "🔑",
     "enable_telegram": "🤖",
     "telegram_bot_token": "🔐",
+    "notify_new_purchases": "🛒",
+    "notify_chat_messages": "💬",
+    "notify_errors": "🚨",
+    "notify_pending": "⏳",
+    "notify_daily_statistics": "📈",
     "admin_username": "👤",
     "admin_password": "🔒",
 }

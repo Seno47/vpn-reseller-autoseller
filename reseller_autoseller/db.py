@@ -361,6 +361,20 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_sale_with_delivery_by_id(self, sale_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT s.*, d.id AS delivery_id, d.xyranet_order_id, d.subscription_url,
+                       d.panel_username, d.tariff_code AS delivered_tariff_code, d.delivery_text
+                FROM sales s
+                LEFT JOIN deliveries d ON d.sale_id = s.id
+                WHERE s.id=?
+                """,
+                (sale_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def create_sale(self, event: Any) -> dict[str, Any]:
         with self.connect() as conn:
             conn.execute(
@@ -460,17 +474,19 @@ class Database:
             row = conn.execute("SELECT * FROM pending_operations WHERE sale_id=?", (sale_id,)).fetchone()
             return dict(row) if row else None
 
-    def list_pending_operations(self, status: str = "waiting_order_id") -> list[dict[str, Any]]:
+    def list_pending_operations(self, status: str | None = "waiting_order_id") -> list[dict[str, Any]]:
         with self.connect() as conn:
+            where = "WHERE p.status=?" if status else ""
+            params: tuple[Any, ...] = (status,) if status else ()
             rows = conn.execute(
-                """
+                f"""
                 SELECT p.*, s.raw_payload
                 FROM pending_operations p
                 JOIN sales s ON s.id = p.sale_id
-                WHERE p.status=?
+                {where}
                 ORDER BY p.id
                 """,
-                (status,),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -516,6 +532,21 @@ class Database:
             conn.execute(
                 "UPDATE pending_operations SET status='error', error_text=?, updated_at=? WHERE id=?",
                 (error_text, utcnow(), operation_id),
+            )
+            row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
+            return dict(row) if row else None
+
+    def retry_pending_operation(self, operation_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE pending_operations
+                SET status='waiting_order_id',
+                    error_text='',
+                    updated_at=?
+                WHERE id=?
+                """,
+                (utcnow(), operation_id),
             )
             row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
             return dict(row) if row else None

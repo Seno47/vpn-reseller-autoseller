@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>XyraNet Reseller</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260704-2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260704-3">
 </head>
 <body>
   <section class="login-screen" id="loginScreen">
@@ -39,6 +39,7 @@
       <button data-section-tab="templates" type="button">Шаблоны</button>
       <button data-section-tab="variables" type="button">Переменные</button>
       <button data-section-tab="statistics" type="button">Статистика</button>
+      <button data-section-tab="diagnostics" type="button">Диагностика</button>
       <button data-section-tab="settings" type="button">Настройки</button>
       <button data-section-tab="sales" type="button">Продажи</button>
     </nav>
@@ -304,13 +305,66 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Площадка</th><th>Заказ</th><th>Лот</th><th>Вариант</th><th>XyraNet</th><th>Дата</th></tr></thead>
+          <thead><tr><th>Площадка</th><th>Заказ</th><th>Лот</th><th>Вариант</th><th>XyraNet</th><th>Дата</th><th>Действия</th></tr></thead>
           <tbody id="sales"></tbody>
         </table>
       </div>
     </section>
     </section>
+
+    <section class="app-section" data-section="diagnostics">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Проверки и бэкап</h2>
+          <div class="panel-actions">
+            <button class="secondary" data-smoke-test="xyranet" type="button">XyraNet API</button>
+            <button class="secondary" data-smoke-test="digiseller" type="button">Digiseller API</button>
+            <button class="secondary" data-smoke-test="ggsel" type="button">GGsel</button>
+            <button class="secondary" data-smoke-test="telegram" type="button">Telegram</button>
+            <button class="secondary" id="backupDatabaseButton" type="button">Скачать бэкап</button>
+          </div>
+        </div>
+        <p class="notice" id="smokeTestStatus"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Pending-операции</h2>
+          <label class="period-field">Статус
+            <select id="pendingStatusFilter">
+              <option value="waiting_order_id">Ожидают order_id</option>
+              <option value="error">Ошибки</option>
+              <option value="completed">Завершённые</option>
+              <option value="all">Все</option>
+            </select>
+          </label>
+        </div>
+        <div class="table-wrap scroll-card">
+          <table>
+            <thead><tr><th>ID</th><th>Заказ</th><th>Действие</th><th>Статус</th><th>Order ID</th><th>Ошибка</th><th>Действия</th></tr></thead>
+            <tbody id="pendingOperations"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>История событий</h2>
+          <div class="panel-actions event-filters">
+            <input id="eventMarketplaceFilter" placeholder="Площадка">
+            <input id="eventOrderFilter" placeholder="ID заказа/чата">
+            <button id="refreshEventsButton" class="secondary" type="button">Показать</button>
+          </div>
+        </div>
+        <div class="table-wrap scroll-card">
+          <table>
+            <thead><tr><th>Дата</th><th>Заказ</th><th>Событие</th><th>Статус</th><th>Сообщение</th></tr></thead>
+            <tbody id="orderEvents"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
   </main>
-  <script src="/static/app.js?v=20260704-2"></script>
+  <script src="/static/app.js?v=20260704-3"></script>
 </body>
 </html>

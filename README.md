@@ -11,6 +11,7 @@ Autoseller for XyraNet Wholesale API with Plati.Market/Digiseller and GGsel inte
 - Web panel for mappings, settings, templates, variables, statistics, sales, and bot access.
 - Telegram admin bot with the same operational controls, statistics, sales, settings, and notifications.
 - Admin notifications for new purchases, chat messages, pending actions, successful delivery, and errors.
+- Diagnostics tab with API smoke-tests, database backup, pending retry/complete, manual resend, and order event history.
 - Durable SQLite storage with idempotent deliveries, pending operations, and order event history.
 - Production deployment with localhost-only app binding, HTTPS reverse proxy, or SSH-tunnel access without public IP.
 

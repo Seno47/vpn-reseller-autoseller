@@ -985,8 +985,6 @@ def delivery_template_key(action: str) -> str:
 
 
 def with_statistics_expense(response: dict[str, Any], expense_rub: Decimal) -> dict[str, Any]:
-    if expense_rub <= 0:
-        return response
     return {**response, "statistics_expense_rub": str(expense_rub)}
 
 

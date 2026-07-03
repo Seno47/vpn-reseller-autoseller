@@ -54,6 +54,14 @@ const statisticsMarketplaces = document.querySelector("#statisticsMarketplaces")
 const statisticsActions = document.querySelector("#statisticsActions");
 const statisticsTariffs = document.querySelector("#statisticsTariffs");
 const statisticsDays = document.querySelector("#statisticsDays");
+const pendingStatusFilter = document.querySelector("#pendingStatusFilter");
+const pendingOperations = document.querySelector("#pendingOperations");
+const orderEvents = document.querySelector("#orderEvents");
+const eventMarketplaceFilter = document.querySelector("#eventMarketplaceFilter");
+const eventOrderFilter = document.querySelector("#eventOrderFilter");
+const refreshEventsButton = document.querySelector("#refreshEventsButton");
+const smokeTestStatus = document.querySelector("#smokeTestStatus");
+const backupDatabaseButton = document.querySelector("#backupDatabaseButton");
 const actionParamsField = document.querySelector("#actionParamsField");
 const actionParamsTitle = document.querySelector("#actionParamsTitle");
 const actionParamAmountField = document.querySelector("#actionParamAmountField");
@@ -76,6 +84,8 @@ let complexVariables = [];
 let ordinaryComplexVariableSources = [];
 let editingComplexVariableKey = "";
 let statisticsData = null;
+let pendingRows = [];
+let orderEventRows = [];
 
 function setActiveSection(section) {
   sectionTabs.forEach((button) => {
@@ -505,12 +515,19 @@ function renderStatistics(data) {
   statisticsData = data;
   const totals = data?.totals || {};
   const period = data?.period || {};
+  const unknownExpense = Number(totals.expense_unknown_count || 0);
+  const expenseNote = unknownExpense
+    ? `${unknownExpense} выданных заказов без известной себестоимости`
+    : "по сохранённым API-ответам";
+  const profitNote = unknownExpense
+    ? "прибыль неполная"
+    : (totals.margin_percent === null ? "маржа n/a" : `маржа ${totals.margin_percent}%`);
   statisticsMetrics.innerHTML = `
     <article class="stat-card"><span>Период</span><strong>${escapeHtml(period.label || "")}</strong><small>${escapeHtml(period.from ? period.from.slice(0, 10) : "всё время")}</small></article>
     <article class="stat-card"><span>Продаж</span><strong>${totals.sales_count || 0}</strong><small>${totals.delivered_count || 0} выдано · ${totals.pending_count || 0} ждёт</small></article>
     <article class="stat-card"><span>Сумма продаж</span><strong>${revenueText(totals)}</strong><small>по валютам площадок</small></article>
-    <article class="stat-card"><span>Расход XyraNet</span><strong>${escapeHtml(moneyText(totals.expense_rub))}</strong><small>по сохранённым API-ответам</small></article>
-    <article class="stat-card"><span>Прибыль</span><strong>${escapeHtml(moneyText(totals.profit_rub))}</strong><small>${totals.margin_percent === null ? "маржа n/a" : `маржа ${totals.margin_percent}%`} · чек ${escapeHtml(moneyText(totals.avg_order_rub))}</small></article>
+    <article class="stat-card"><span>Расход XyraNet</span><strong>${escapeHtml(moneyText(totals.expense_rub))}</strong><small>${escapeHtml(expenseNote)}</small></article>
+    <article class="stat-card"><span>Прибыль</span><strong>${escapeHtml(moneyText(totals.profit_rub))}</strong><small>${escapeHtml(profitNote)} · чек ${escapeHtml(moneyText(totals.avg_order_rub))}</small></article>
   `;
   renderStatisticsTable(statisticsMarketplaces, data?.marketplaces || []);
   renderStatisticsTable(statisticsActions, data?.actions || [], actionLabel);
@@ -1182,8 +1199,122 @@ function renderSales(rows) {
       <td>${row.external_variant_id ? escapeHtml(row.external_variant_id) : "<span class=\"muted\">общий</span>"}</td>
       <td>${escapeHtml(row.xyranet_order_id || "ожидает")}</td>
       <td>${escapeHtml(row.created_at)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="secondary" data-event-sale="${row.marketplace}:${row.external_order_id}" type="button">История</button>
+          <button class="secondary" data-sale-resend="${row.id}" type="button" ${row.xyranet_order_id ? "" : "disabled"}>Повторить</button>
+        </div>
+      </td>
     </tr>
   `).join("");
+  document.querySelectorAll("[data-event-sale]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const [marketplace, ...orderParts] = button.dataset.eventSale.split(":");
+      eventMarketplaceFilter.value = marketplace;
+      eventOrderFilter.value = orderParts.join(":");
+      setActiveSection("diagnostics");
+      await loadOrderEvents();
+    });
+  });
+  document.querySelectorAll("[data-sale-resend]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Повторно отправить сохранённую выдачу в чат площадки?")) {
+        return;
+      }
+      try {
+        await api(`/admin/api/sales/${button.dataset.saleResend}/resend`, {method: "POST"});
+        await loadOrderEvents();
+        alert("Выдача отправлена повторно.");
+      } catch (error) {
+        alert(error.message || error);
+      }
+    });
+  });
+}
+
+function renderPendingOperations(rows) {
+  pendingRows = Array.isArray(rows) ? rows : [];
+  pendingOperations.innerHTML = pendingRows.map((row) => `
+    <tr>
+      <td>#${row.id}</td>
+      <td>${escapeHtml(row.marketplace)}:${escapeHtml(row.external_order_id)}</td>
+      <td>${escapeHtml(actionLabel(row.action))}</td>
+      <td><span class="pill ${row.status === "error" ? "off" : "neutral"}">${escapeHtml(row.status)}</span></td>
+      <td>${row.target_order_id ? `<code>${escapeHtml(row.target_order_id)}</code>` : "<span class=\"muted\">ждём</span>"}</td>
+      <td>${escapeHtml(row.error_text || "")}</td>
+      <td>
+        <div class="row-actions">
+          <button class="secondary" data-pending-complete="${row.id}" type="button">Завершить</button>
+          <button class="secondary" data-pending-retry="${row.id}" type="button" ${row.status === "error" ? "" : "disabled"}>Retry</button>
+          <button class="secondary" data-pending-events="${row.marketplace}:${row.external_order_id}" type="button">История</button>
+        </div>
+      </td>
+    </tr>
+  `).join("") || `<tr><td colspan="7"><span class="muted">Нет операций</span></td></tr>`;
+  document.querySelectorAll("[data-pending-complete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const orderId = prompt("Введите ID заказа XyraNet для применения услуги");
+      if (!orderId) {
+        return;
+      }
+      try {
+        await api(`/admin/api/pending-operations/${button.dataset.pendingComplete}/complete`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({order_id: orderId.trim()}),
+        });
+        await loadPendingOperations();
+        await loadOrderEvents();
+      } catch (error) {
+        alert(error.message || error);
+      }
+    });
+  });
+  document.querySelectorAll("[data-pending-retry]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/admin/api/pending-operations/${button.dataset.pendingRetry}/retry`, {method: "POST"});
+      await loadPendingOperations();
+      await loadOrderEvents();
+    });
+  });
+  document.querySelectorAll("[data-pending-events]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const [marketplace, ...orderParts] = button.dataset.pendingEvents.split(":");
+      eventMarketplaceFilter.value = marketplace;
+      eventOrderFilter.value = orderParts.join(":");
+      await loadOrderEvents();
+    });
+  });
+}
+
+function renderOrderEvents(rows) {
+  orderEventRows = Array.isArray(rows) ? rows : [];
+  orderEvents.innerHTML = orderEventRows.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.created_at)}</td>
+      <td>${escapeHtml(row.marketplace)}:${escapeHtml(row.external_order_id)}</td>
+      <td><code>${escapeHtml(row.event_type)}</code></td>
+      <td><span class="pill ${row.status === "error" ? "off" : "neutral"}">${escapeHtml(row.status)}</span></td>
+      <td>${escapeHtml(row.message || "")}</td>
+    </tr>
+  `).join("") || `<tr><td colspan="5"><span class="muted">История пока пустая</span></td></tr>`;
+}
+
+async function loadPendingOperations() {
+  const status = pendingStatusFilter?.value || "waiting_order_id";
+  renderPendingOperations(await api(`/admin/api/pending-operations?status=${encodeURIComponent(status)}`));
+}
+
+async function loadOrderEvents() {
+  const params = new URLSearchParams();
+  if (eventMarketplaceFilter.value.trim()) {
+    params.set("marketplace", eventMarketplaceFilter.value.trim());
+  }
+  if (eventOrderFilter.value.trim()) {
+    params.set("external_order_id", eventOrderFilter.value.trim());
+  }
+  params.set("limit", "200");
+  renderOrderEvents(await api(`/admin/api/order-events?${params.toString()}`));
 }
 
 async function loadAll() {
@@ -1193,7 +1324,8 @@ async function loadAll() {
   }
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
-    const [status, productsRows, salesRows, settingsRows, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig] = await Promise.all([
+    const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
+    const [status, productsRows, salesRows, settingsRows, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
       api("/admin/api/status"),
       api("/admin/api/products"),
       api("/admin/api/sales"),
@@ -1203,6 +1335,8 @@ async function loadAll() {
       api("/admin/api/delivery-template"),
       api("/admin/api/complex-variables"),
       api(`/admin/api/statistics?period=${encodeURIComponent(selectedPeriod)}`),
+      api(`/admin/api/pending-operations?status=${encodeURIComponent(pendingStatus)}`),
+      api("/admin/api/order-events?limit=200"),
     ]);
     let summary = null;
     try {
@@ -1220,6 +1354,8 @@ async function loadAll() {
     renderTemplateVariables(templateConfig);
     renderComplexVariables(complexVariableConfig);
     renderStatistics(statisticsConfig);
+    renderPendingOperations(pendingConfig);
+    renderOrderEvents(eventsConfig);
     hideLogin();
   } catch (error) {
     showLogin();
@@ -1263,6 +1399,45 @@ mappingSearch.addEventListener("input", () => renderProducts());
 statisticsPeriod.addEventListener("change", async () => {
   try {
     renderStatistics(await api(`/admin/api/statistics?period=${encodeURIComponent(statisticsPeriod.value)}`));
+  } catch (error) {
+    alert(error.message || error);
+  }
+});
+
+pendingStatusFilter.addEventListener("change", loadPendingOperations);
+refreshEventsButton.addEventListener("click", loadOrderEvents);
+
+document.querySelectorAll("[data-smoke-test]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const name = button.dataset.smokeTest;
+    button.disabled = true;
+    smokeTestStatus.textContent = "Проверяю...";
+    try {
+      const result = await api(`/admin/api/smoke-tests/${name}`, {method: "POST"});
+      smokeTestStatus.textContent = `${name}: ${result.status} — ${result.detail || ""}`;
+    } catch (error) {
+      smokeTestStatus.textContent = `${name}: ${error.message || error}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+});
+
+backupDatabaseButton.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/admin/api/backup/database", {headers: authHeaders()});
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "xyranet-reseller-backup.sqlite3";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   } catch (error) {
     alert(error.message || error);
   }

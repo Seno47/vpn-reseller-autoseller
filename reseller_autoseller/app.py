@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import sqlite3
 import secrets
+import time
 from contextlib import asynccontextmanager
+from datetime import date
 from html import escape
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -129,10 +132,34 @@ def create_app() -> FastAPI:
     )
     bot_task: asyncio.Task[Any] | None = None
     chat_task: asyncio.Task[Any] | None = None
+    daily_task: asyncio.Task[Any] | None = None
     bot_lock = asyncio.Lock()
     bot_last_error = ""
+    recent_notifications: dict[str, float] = {}
 
-    def notify_admins(text: str) -> None:
+    def notify_admins(text: str, kind: str = "errors") -> None:
+        setting_key = f"notify_{kind}"
+        if setting_key in {
+            "notify_new_purchases",
+            "notify_chat_messages",
+            "notify_errors",
+            "notify_pending",
+            "notify_daily_statistics",
+        } and not runtime.get_bool(setting_key):
+            return
+        now = time.monotonic()
+        dedupe_window = 60 if kind == "chat_messages" else 20
+        dedupe_key = f"{kind}:{text}"
+        last_sent = recent_notifications.get(dedupe_key, 0)
+        if now - last_sent < dedupe_window:
+            return
+        recent_notifications[dedupe_key] = now
+        if len(recent_notifications) > 300:
+            cutoff = now - 3600
+            for key, timestamp in list(recent_notifications.items()):
+                if timestamp < cutoff:
+                    recent_notifications.pop(key, None)
+
         async def runner() -> None:
             await notifier.send_admins(text)
 
@@ -194,6 +221,33 @@ def create_app() -> FastAPI:
             f"<pre>{escape(compact_text(text, 700))}</pre>"
         )
 
+    def daily_statistics_text() -> str:
+        data = build_sales_statistics(db.list_sales_for_statistics(), period="yesterday")
+        totals = data["totals"]
+        revenue = ", ".join(f"{item['text']} {item['currency']}" for item in totals.get("revenue", [])) or "0 ₽"
+        return (
+            "📈 <b>Ежедневная статистика</b>\n"
+            f"Период: <b>{escape(str(data['period']['label']))}</b>\n"
+            f"Продаж: <b>{totals['sales_count']}</b> ({totals['delivered_count']} выдано, {totals['pending_count']} ждёт)\n"
+            f"Сумма: <b>{escape(revenue)}</b>\n"
+            f"Расход: <b>{escape(str(totals['expense_rub']['text']))} ₽</b>\n"
+            f"Прибыль: <b>{escape(str(totals['profit_rub']['text']))} ₽</b>"
+        )
+
+    async def daily_statistics_loop() -> None:
+        last_sent = ""
+        while True:
+            try:
+                today = date.today().isoformat()
+                if runtime.get_bool("notify_daily_statistics") and last_sent != today:
+                    notify_admins(daily_statistics_text(), kind="daily_statistics")
+                    last_sent = today
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Daily statistics notification failed")
+            await asyncio.sleep(3600)
+
     def message_id(message: dict[str, Any]) -> str:
         for key in ("id", "message_id", "id_d", "id_msg", "id_debate"):
             if message.get(key) not in (None, ""):
@@ -211,6 +265,17 @@ def create_app() -> FastAPI:
             if chat.get(key) not in (None, ""):
                 return str(chat[key])
         return ""
+
+    def sale_chat_id(sale: dict[str, Any]) -> str:
+        if str(sale.get("marketplace") or "") in {"plati", "digiseller"}:
+            try:
+                payload = json.loads(str(sale.get("raw_payload") or "{}"))
+            except ValueError:
+                payload = {}
+            for key in ("inv", "id_i", "invoice_id", "order_id"):
+                if payload.get(key) not in (None, ""):
+                    return str(payload[key])
+        return str(sale.get("external_order_id") or "")
 
     def unique_codes_from_text(text: str) -> list[str]:
         found: list[str] = []
@@ -266,7 +331,7 @@ def create_app() -> FastAPI:
                     "♻️ <b>Повторная отправка выдачи</b>\n"
                     f"Заказ: <code>{escape(str(existing.get('marketplace')))}:{escape(str(existing.get('external_order_id')))}</code>\n"
                     f"Чат: <code>{escape(invoice_id)}</code>"
-                )
+                , kind="pending")
                 return True
             result = await delivery_service.handle_sale(event, notify_marketplace=False)
             if not await messenger.send_message("plati", invoice_id, str(result["delivery_text"])):
@@ -290,7 +355,7 @@ def create_app() -> FastAPI:
                 status="success",
                 payload={"invoice_id": invoice_id, "status": result.get("status")},
             )
-            notify_admins(sale_notification_text(result, source="Digiseller chat"))
+            notify_admins(sale_notification_text(result, source="Digiseller chat"), kind="new_purchases")
             if result.get("status") in {"delivered", "waiting_order_id"}:
                 await digiseller.mark_unique_code_delivered(code)
                 db.add_order_event(
@@ -322,7 +387,7 @@ def create_app() -> FastAPI:
                 f"Чат: <code>{escape(invoice_id)}</code>\n"
                 f"Код: <code>{escape(code)}</code>\n"
                 f"Ошибка: <code>{escape(str(exc))}</code>"
-            )
+            , kind="errors")
             return True
         except Exception as exc:
             log.exception("Cannot process Digiseller unique code from chat %s", invoice_id)
@@ -344,7 +409,7 @@ def create_app() -> FastAPI:
                 f"Чат: <code>{escape(invoice_id)}</code>\n"
                 f"Код: <code>{escape(code)}</code>\n"
                 f"Ошибка: <code>{escape(str(exc))}</code>"
-            )
+            , kind="errors")
             return True
 
     def pending_operation_for_chat(marketplace: str, external_order_id: str) -> dict[str, Any] | None:
@@ -379,7 +444,7 @@ def create_app() -> FastAPI:
                 f"Чат: <code>{escape(invoice_id)}</code>\n"
                 f"ID заказа: <code>{escape(command['order_id'])}</code>\n"
                 "Статус: ✅ выполнено"
-            )
+            , kind="pending")
             return True
         except Exception as exc:
             log.exception("Cannot process free reissue command from chat %s", invoice_id)
@@ -389,7 +454,7 @@ def create_app() -> FastAPI:
                 f"Чат: <code>{escape(invoice_id)}</code>\n"
                 f"ID заказа: <code>{escape(command['order_id'])}</code>\n"
                 f"Ошибка: <code>{escape(str(exc))}</code>"
-            )
+            , kind="errors")
             return True
 
     async def poll_digiseller_unique_code_chats() -> None:
@@ -427,7 +492,7 @@ def create_app() -> FastAPI:
                     last_message = current_id
                 text = message_text(message)
                 if text and current_id != last_seen:
-                    notify_admins(chat_message_notification("plati", invoice_id, text))
+                    notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
                 for code in unique_codes_from_text(text):
                     handled = await process_unique_code_message(invoice_id, code)
                     if handled:
@@ -475,7 +540,8 @@ def create_app() -> FastAPI:
                                     str(operation["marketplace"]),
                                     str(operation["external_order_id"]),
                                     text,
-                                )
+                                ),
+                                kind="chat_messages",
                             )
                         command = parse_chat_command(text)
                         if command:
@@ -515,7 +581,7 @@ def create_app() -> FastAPI:
                             f"Заказ: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
                             f"Ожидали: <b>{escape(action_label(str(operation['action'])))}</b>\n"
                             f"Получили: <code>{escape(wrong_command_action)}</code>"
-                        )
+                        , kind="pending")
                         continue
                     if missing_command_order_id:
                         db.add_order_event(
@@ -551,7 +617,7 @@ def create_app() -> FastAPI:
                             f"Действие: <b>{escape(action_label(str(operation['action'])))}</b>\n"
                             f"ID заказа: <code>{escape(found_order_id)}</code>\n"
                             f"Статус: <b>{escape(str(result.get('status') or 'delivered'))}</b>"
-                        )
+                        , kind="pending")
                     except Exception as exc:
                         db.fail_pending_operation(int(operation["id"]), str(exc))
                         db.add_order_event(
@@ -575,13 +641,8 @@ def create_app() -> FastAPI:
                             f"Действие: <b>{escape(action_label(str(operation['action'])))}</b>\n"
                             f"ID заказа: <code>{escape(found_order_id)}</code>\n"
                             f"Ошибка: <code>{escape(str(exc))}</code>"
-                        )
+                        , kind="errors")
                         continue
-                        await messenger.send_message(
-                            str(operation["marketplace"]),
-                            str(operation["external_order_id"]),
-                            f"⚠️ Не удалось применить услугу: {exc}",
-                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -655,16 +716,23 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal chat_task
+        nonlocal chat_task, daily_task
         db.init()
         async with bot_lock:
             await start_telegram_bot()
         chat_task = asyncio.create_task(poll_marketplace_chats())
+        daily_task = asyncio.create_task(daily_statistics_loop())
         yield
         if chat_task:
             chat_task.cancel()
             try:
                 await chat_task
+            except asyncio.CancelledError:
+                pass
+        if daily_task:
+            daily_task.cancel()
+            try:
+                await daily_task
             except asyncio.CancelledError:
                 pass
         async with bot_lock:
@@ -959,13 +1027,36 @@ def create_app() -> FastAPI:
     async def admin_sales(limit: int = 50) -> list[dict[str, Any]]:
         return db.list_sales(limit=max(1, min(limit, 500)))
 
+    @app.post("/admin/api/sales/{sale_id}/resend", dependencies=[Depends(require_admin)])
+    async def admin_sale_resend(sale_id: int) -> dict[str, Any]:
+        sale = db.get_sale_with_delivery_by_id(sale_id)
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+        if not sale.get("delivery_id") or not sale.get("delivery_text"):
+            raise HTTPException(status_code=400, detail="Sale has no saved delivery")
+        chat_id = sale_chat_id(sale)
+        ok = await messenger.send_message(str(sale["marketplace"]), chat_id, str(sale["delivery_text"]))
+        db.add_order_event(
+            marketplace=str(sale["marketplace"]),
+            external_order_id=str(sale["external_order_id"]),
+            sale_id=int(sale["id"]),
+            event_type="manual_resend",
+            status="success" if ok else "error",
+            message="Manual resend from web panel",
+            payload={"chat_id": chat_id},
+        )
+        if not ok:
+            raise HTTPException(status_code=502, detail="Cannot send saved delivery to marketplace chat")
+        return {"status": "ok", "chat_id": chat_id}
+
     @app.get("/admin/api/statistics", dependencies=[Depends(require_admin)])
     async def admin_statistics(period: str = "30d") -> dict[str, Any]:
         return build_sales_statistics(db.list_sales_for_statistics(), period=period)
 
     @app.get("/admin/api/pending-operations", dependencies=[Depends(require_admin)])
-    async def admin_pending_operations() -> list[dict[str, Any]]:
-        return db.list_pending_operations()
+    async def admin_pending_operations(status: str = "waiting_order_id") -> list[dict[str, Any]]:
+        selected = status.strip() or "waiting_order_id"
+        return db.list_pending_operations(None if selected == "all" else selected)
 
     @app.get("/admin/api/order-events", dependencies=[Depends(require_admin)])
     async def admin_order_events(
@@ -981,13 +1072,70 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/api/pending-operations/{operation_id}/complete", dependencies=[Depends(require_admin)])
     async def admin_pending_complete(operation_id: int, payload: CompletePendingIn) -> dict[str, Any]:
-        pending = next((row for row in db.list_pending_operations() if int(row["id"]) == operation_id), None)
+        pending = next((row for row in db.list_pending_operations(None) if int(row["id"]) == operation_id), None)
         if not pending:
             raise HTTPException(status_code=404, detail="Pending operation not found")
         try:
             return await delivery_service.complete_pending_operation(pending, payload.order_id.strip())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/admin/api/pending-operations/{operation_id}/retry", dependencies=[Depends(require_admin)])
+    async def admin_pending_retry(operation_id: int) -> dict[str, Any]:
+        pending = db.retry_pending_operation(operation_id)
+        if not pending:
+            raise HTTPException(status_code=404, detail="Pending operation not found")
+        db.add_order_event(
+            marketplace=str(pending["marketplace"]),
+            external_order_id=str(pending["external_order_id"]),
+            sale_id=int(pending["sale_id"]),
+            pending_operation_id=int(pending["id"]),
+            event_type="manual_pending_retry",
+            status="info",
+            message="Pending operation was returned to waiting_order_id",
+        )
+        return pending
+
+    @app.get("/admin/api/backup/database", dependencies=[Depends(require_admin)])
+    async def admin_backup_database() -> FileResponse:
+        database_file = settings.database_file
+        if not database_file.exists():
+            raise HTTPException(status_code=404, detail="Database file not found")
+        return FileResponse(
+            database_file,
+            media_type="application/octet-stream",
+            filename=f"xyranet-reseller-backup-{database_file.name}",
+        )
+
+    @app.post("/admin/api/smoke-tests/xyranet", dependencies=[Depends(require_admin)])
+    async def admin_smoke_xyranet() -> dict[str, Any]:
+        try:
+            data = await xyranet.summary()
+            return {"status": "ok", "detail": "XyraNet API is reachable", "summary": data}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+    @app.post("/admin/api/smoke-tests/digiseller", dependencies=[Depends(require_admin)])
+    async def admin_smoke_digiseller() -> dict[str, Any]:
+        try:
+            await digiseller.client().token()
+            return {"status": "ok", "detail": "Digiseller token received"}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+    @app.post("/admin/api/smoke-tests/ggsel", dependencies=[Depends(require_admin)])
+    async def admin_smoke_ggsel() -> dict[str, Any]:
+        if not runtime.get_text("ggsel_api_key"):
+            return {"status": "error", "detail": "GGsel API key is not configured"}
+        return {"status": "ok", "detail": "GGsel API key is configured. Send/read checks require a real order chat."}
+
+    @app.post("/admin/api/smoke-tests/telegram", dependencies=[Depends(require_admin)])
+    async def admin_smoke_telegram() -> dict[str, Any]:
+        try:
+            await notifier.send_admins("✅ <b>Тестовое уведомление</b>\nTelegram-уведомления работают.")
+            return {"status": "ok", "detail": "Test notification sent to admins"}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
 
     @app.get("/admin/api/settings", dependencies=[Depends(require_admin)])
     async def admin_settings() -> list[dict[str, Any]]:
