@@ -12,6 +12,7 @@ from datetime import date
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -1158,7 +1159,6 @@ def create_app() -> FastAPI:
             return {"marketplace": "", "productId": extract_product_id(source), "variantId": "", "variants": []}
         try:
             async with httpx.AsyncClient(
-                follow_redirects=True,
                 timeout=15,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1167,7 +1167,24 @@ def create_app() -> FastAPI:
                     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
                 },
             ) as client:
-                response = await client.get(source)
+                current_url = source
+                response: httpx.Response | None = None
+                for _ in range(5):
+                    if not is_allowed_lot_url(current_url):
+                        raise HTTPException(status_code=400, detail="Lot URL redirected to an unsupported host")
+                    response = await client.get(current_url, follow_redirects=False)
+                    if response.status_code not in {301, 302, 303, 307, 308}:
+                        break
+                    location = response.headers.get("location")
+                    if not location:
+                        break
+                    current_url = urljoin(str(response.url), location)
+                if response is None:
+                    raise HTTPException(status_code=502, detail="Cannot fetch lot page")
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    raise HTTPException(status_code=400, detail="Lot URL has too many redirects")
+                if is_allowed_lot_url(str(response.url)) is False:
+                    raise HTTPException(status_code=400, detail="Lot URL redirected to an unsupported host")
                 response.raise_for_status()
                 html = response.content.decode("utf-8", errors="replace")
         except httpx.HTTPError as exc:

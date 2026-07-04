@@ -1,9 +1,18 @@
 import unittest
 
-from reseller_autoseller.lot_parser import parse_lot_html
+from reseller_autoseller.lot_parser import is_allowed_lot_url, parse_lot_html
 
 
 class LotParserTests(unittest.TestCase):
+    def test_lot_url_allowlist_rejects_internal_and_unknown_hosts(self):
+        self.assertTrue(is_allowed_lot_url("https://plati.io/itm/demo/5968452"))
+        self.assertTrue(is_allowed_lot_url("https://my.digiseller.com/inside/lot?id_goods=5968452"))
+        self.assertTrue(is_allowed_lot_url("https://ggsel.net/catalog/demo"))
+
+        self.assertFalse(is_allowed_lot_url("http://127.0.0.1:8095/admin/api/settings"))
+        self.assertFalse(is_allowed_lot_url("http://169.254.169.254/latest/meta-data"))
+        self.assertFalse(is_allowed_lot_url("https://plati.io.evil.example/itm/demo/5968452"))
+
     def test_parses_plati_radio_options(self):
         html = """
         <html><head><title>Купить Test VPN</title></head><body>
