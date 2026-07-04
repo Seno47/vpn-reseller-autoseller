@@ -6,7 +6,14 @@ from tempfile import TemporaryDirectory
 
 from reseller_autoseller.db import Database
 from reseller_autoseller.marketplaces import SaleEvent
-from reseller_autoseller.services import DeliveryService, extract_order_id_from_text, parse_chat_command, render_template, sale_quantity
+from reseller_autoseller.services import (
+    TEMPLATE_GROUPS,
+    DeliveryService,
+    extract_order_id_from_text,
+    parse_chat_command,
+    render_template,
+    sale_quantity,
+)
 from reseller_autoseller.statistics import build_sales_statistics
 
 
@@ -81,6 +88,20 @@ class DeliveryServiceTests(unittest.TestCase):
 
             self.assertEqual(service.expected_command("renew"), "!extend")
             self.assertEqual(service.action_for_command("!extend"), "renew")
+
+    def test_purchase_template_group_has_no_reissue_command(self) -> None:
+        group = next(item for item in TEMPLATE_GROUPS if item["key"] == "create")
+
+        self.assertNotIn("command_action", group)
+        self.assertEqual([stage["key"] for stage in group["stages"]], ["create"])
+
+    def test_reissue_template_group_owns_free_reissue_templates(self) -> None:
+        group = next(item for item in TEMPLATE_GROUPS if item["key"] == "reissue")
+        stage_keys = {stage["key"] for stage in group["stages"]}
+
+        self.assertEqual(group["command_action"], "reissue")
+        self.assertIn("free_reissue_help", stage_keys)
+        self.assertIn("free_reissue_disabled", stage_keys)
 
     def test_order_id_parser_ignores_placeholder(self) -> None:
         self.assertEqual(extract_order_id_from_text("!renew {ORDER_ID}"), "")

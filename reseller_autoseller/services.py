@@ -168,11 +168,8 @@ TEMPLATE_GROUPS = [
     {
         "key": "create",
         "label": BASE_ACTION_LABELS["create"],
-        "command_action": "reissue",
         "stages": [
             {"key": "create", "stage": "delivered", "label": "Заказ выдан"},
-            {"key": "free_reissue_help", "stage": "free_reissue_help", "label": "Команда без ID заказа"},
-            {"key": "free_reissue_disabled", "stage": "free_reissue_disabled", "label": "Бесплатный перевыпуск отключён"},
         ],
     },
     {
