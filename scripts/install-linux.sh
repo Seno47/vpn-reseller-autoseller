@@ -153,7 +153,7 @@ fi
 
 ADMIN_USERNAME="$(ask "Web panel login" "admin")"
 ADMIN_PASSWORD="$(ask_secret "Web panel password")"
-while [ -z "$ADMIN_PASSWORD" ]; do ADMIN_PASSWORD="$(ask_secret "Web panel password cannot be empty")"; done
+while [ "${#ADMIN_PASSWORD}" -lt 8 ]; do ADMIN_PASSWORD="$(ask_secret "Web panel password must be at least 8 characters")"; done
 
 TELEGRAM_BOT_TOKEN="$(ask_secret "Telegram bot token (can be empty)")"
 ADMIN_IDS="$(ask "Telegram admin ID, comma separated" "")"

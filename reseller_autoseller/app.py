@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -55,6 +55,20 @@ from reseller_autoseller.xyra_client import XyraNetApiError
 log = logging.getLogger(__name__)
 UNIQUE_CODE_RE = re.compile(r"\b[A-Za-z0-9]{16}\b")
 LOOSE_UNIQUE_CODE_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9\s-]{14,36}[A-Za-z0-9]\b")
+DEFAULT_ADMIN_SECRET_VALUES = {
+    "",
+    "admin",
+    "change-me",
+    "changeme",
+    "password",
+    "replace-me",
+    "replace-with-random-long-token",
+    "replace-with-strong-password",
+}
+MIN_ADMIN_PASSWORD_LENGTH = 8
+MIN_ADMIN_TOKEN_LENGTH = 24
+LOGIN_RATE_LIMIT_MAX_FAILURES = 8
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
 
 
 class ProductMappingIn(BaseModel):
@@ -135,6 +149,7 @@ def create_app() -> FastAPI:
     bot_last_error = ""
     recent_notifications: dict[str, float] = {}
     poll_error_notifications: dict[str, float] = {}
+    login_failures: dict[str, list[float]] = {}
 
     def notify_admins(text: str, kind: str = "errors") -> None:
         setting_key = f"notify_{kind}"
@@ -862,7 +877,37 @@ def create_app() -> FastAPI:
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+    def unsafe_admin_secret(value: str, *, minimum_length: int) -> bool:
+        normalized = value.strip()
+        return normalized.lower() in DEFAULT_ADMIN_SECRET_VALUES or len(normalized) < minimum_length
+
+    def ensure_admin_secrets_are_safe() -> None:
+        if unsafe_admin_secret(runtime.get_text("admin_password"), minimum_length=MIN_ADMIN_PASSWORD_LENGTH):
+            raise HTTPException(status_code=503, detail="Set a strong ADMIN_PASSWORD before using the web panel")
+        if unsafe_admin_secret(settings.admin_token, minimum_length=MIN_ADMIN_TOKEN_LENGTH):
+            raise HTTPException(status_code=503, detail="Set a strong ADMIN_TOKEN before using the web panel")
+
+    def login_rate_key(request: Request, username: str) -> str:
+        client_host = request.client.host if request.client else "unknown"
+        return f"{client_host}:{username.strip().lower()}"
+
+    def check_login_rate_limit(key: str) -> None:
+        now = time.monotonic()
+        recent = [timestamp for timestamp in login_failures.get(key, []) if now - timestamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS]
+        login_failures[key] = recent
+        if len(recent) >= LOGIN_RATE_LIMIT_MAX_FAILURES:
+            raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again later.")
+
+    def record_login_failure(key: str) -> None:
+        now = time.monotonic()
+        login_failures[key] = [
+            timestamp
+            for timestamp in login_failures.get(key, [])
+            if now - timestamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS
+        ] + [now]
+
     def require_admin(authorization: str | None = Header(default=None)) -> None:
+        ensure_admin_secrets_are_safe()
         token = ""
         if authorization and authorization.lower().startswith("bearer "):
             token = authorization[7:].strip()
@@ -878,11 +923,16 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/admin/api/login")
-    async def admin_login(payload: LoginIn) -> dict[str, str]:
+    async def admin_login(request: Request, payload: LoginIn) -> dict[str, str]:
+        ensure_admin_secrets_are_safe()
+        rate_key = login_rate_key(request, payload.username)
+        check_login_rate_limit(rate_key)
         username_ok = secrets.compare_digest(payload.username, runtime.get_text("admin_username"))
         password_ok = secrets.compare_digest(payload.password, runtime.get_text("admin_password"))
         if not username_ok or not password_ok:
+            record_login_failure(rate_key)
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
+        login_failures.pop(rate_key, None)
         return {"token": settings.admin_token, "username": runtime.get_text("admin_username")}
 
     @app.get("/admin/api/status", dependencies=[Depends(require_admin)])
