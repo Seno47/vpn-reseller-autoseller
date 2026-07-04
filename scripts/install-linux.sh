@@ -5,6 +5,8 @@ APP_NAME="xyranet-reseller-autoseller"
 APP_DIR="${APP_DIR:-/opt/${APP_NAME}}"
 APP_USER="${APP_USER:-xyranet-reseller}"
 APP_PORT="${APP_PORT:-8095}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -32,6 +34,106 @@ ask_secret() {
   read -r -s -p "${prompt}: " value
   echo
   echo "$value"
+}
+
+apt_install() {
+  apt-get install -y "$@"
+}
+
+system_python_supported() {
+  local python_bin="$1"
+  "$python_bin" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)
+PY
+}
+
+python_version_text() {
+  local python_bin="$1"
+  "$python_bin" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+PY
+}
+
+ensure_python_venv() {
+  local python_bin="$1"
+  local package
+
+  if "$python_bin" -m venv --help >/dev/null 2>&1; then
+    return
+  fi
+
+  package="$(basename "$python_bin")-venv"
+  echo "Installing venv support for $(basename "$python_bin")..."
+  apt_install "$package" || apt_install python3-venv
+}
+
+find_supported_python() {
+  local candidate
+  for candidate in "${PYTHON_BIN:-}" python3.12 python3.11 python3.10 python3; do
+    if [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1 && system_python_supported "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_python_runtime() {
+  local python_bin
+
+  if python_bin="$(find_supported_python)"; then
+    PYTHON_BIN="$python_bin"
+    ensure_python_venv "$PYTHON_BIN"
+    echo "Using Python $(python_version_text "$PYTHON_BIN") at ${PYTHON_BIN}"
+    return
+  fi
+
+  echo "Supported Python 3.10-3.12 was not found. Installing Python packages..."
+  apt_install python3 python3-venv python3-pip
+
+  if python_bin="$(find_supported_python)"; then
+    PYTHON_BIN="$python_bin"
+    ensure_python_venv "$PYTHON_BIN"
+    echo "Using Python $(python_version_text "$PYTHON_BIN") at ${PYTHON_BIN}"
+    return
+  fi
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+  fi
+
+  if [ "${ID:-}" = "ubuntu" ]; then
+    echo "Default Ubuntu repositories do not provide supported Python. Adding deadsnakes PPA..."
+    apt_install software-properties-common ca-certificates
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update
+    apt_install python3.12 python3.12-venv python3.12-dev
+    PYTHON_BIN="$(command -v python3.12)"
+    ensure_python_venv "$PYTHON_BIN"
+    echo "Using Python $(python_version_text "$PYTHON_BIN") at ${PYTHON_BIN}"
+    return
+  fi
+
+  echo "Could not install supported Python automatically on this OS."
+  echo "Install Python 3.10, 3.11 or 3.12, then run again with PYTHON_BIN=/path/to/python."
+  exit 1
+}
+
+prepare_system_packages() {
+  echo "Updating package index..."
+  apt-get update
+
+  if [ "${SKIP_SYSTEM_UPGRADE:-0}" != "1" ]; then
+    echo "Upgrading installed system packages..."
+    apt-get upgrade -y
+  else
+    echo "Skipping system upgrade because SKIP_SYSTEM_UPGRADE=1."
+  fi
+
+  apt_install ca-certificates curl git rsync openssl build-essential python3-dev
+  install_python_runtime
 }
 
 write_env() {
@@ -140,8 +242,7 @@ need_root
 echo "== XyraNet Reseller Autoseller Linux installer =="
 echo "The app itself will bind to 127.0.0.1:${APP_PORT}; it will not expose HTTP directly."
 
-apt-get update
-apt-get install -y python3 python3-venv python3-pip git rsync openssl curl
+prepare_system_packages
 
 if ! id "$APP_USER" >/dev/null 2>&1; then
   useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
@@ -175,14 +276,14 @@ if [ "$USE_DOMAIN" = "yes" ] || [ "$USE_DOMAIN" = "y" ]; then
   DOMAIN="$(ask "Domain name, DNS A/AAAA must point to this server")"
   CERTBOT_EMAIL="$(ask "Email for Let's Encrypt")"
   APP_BASE_URL="https://${DOMAIN}"
-  apt-get install -y nginx certbot python3-certbot-nginx
+  apt_install nginx certbot python3-certbot-nginx
 else
   APP_BASE_URL="http://127.0.0.1:${APP_PORT}"
 fi
 
 install_source
 cd "$APP_DIR"
-python3 -m venv .venv
+"$PYTHON_BIN" -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 mkdir -p data
