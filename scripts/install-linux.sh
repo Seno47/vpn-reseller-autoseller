@@ -60,7 +60,6 @@ ADMIN_IDS=${ADMIN_IDS}
 ADMIN_USERNAME=${ADMIN_USERNAME}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 ADMIN_TOKEN=${ADMIN_TOKEN}
-MARKETPLACE_WEBHOOK_SECRET=${MARKETPLACE_WEBHOOK_SECRET}
 
 DATABASE_PATH=data/reseller.sqlite3
 ENABLE_TELEGRAM=true
@@ -179,7 +178,6 @@ else
 fi
 
 ADMIN_TOKEN="$(random_secret)"
-MARKETPLACE_WEBHOOK_SECRET="$(random_secret)"
 
 install_source
 cd "$APP_DIR"
@@ -202,10 +200,8 @@ echo "Installed."
 echo "Service: systemctl status ${APP_NAME}"
 echo "Logs: journalctl -u ${APP_NAME} -f"
 echo "Admin API token saved in ${APP_DIR}/.env as ADMIN_TOKEN."
-echo "Webhook secret saved in ${APP_DIR}/.env as MARKETPLACE_WEBHOOK_SECRET."
 if [ -n "$DOMAIN" ]; then
   echo "Panel: https://${DOMAIN}"
-  echo "Webhook example: https://${DOMAIN}/webhooks/plati?secret=${MARKETPLACE_WEBHOOK_SECRET}"
 else
   echo "No public web panel was exposed."
   echo "Connect from your computer with:"

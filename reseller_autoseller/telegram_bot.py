@@ -107,7 +107,7 @@ def format_tariff_label(row: dict[str, Any]) -> str:
 
 SETTING_GROUPS = [
     ("🔌 XyraNet", ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
-    ("🛒 Маркетплейсы", ["marketplace_webhook_secret", "digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
+    ("🛒 Маркетплейсы", ["digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
     ("🤖 Telegram", ["enable_telegram", "telegram_bot_token"]),
     ("🔔 Уведомления", ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
     ("🛡 Веб-панель", ["app_base_url", "admin_username", "admin_password"]),
@@ -118,7 +118,6 @@ SETTING_ICONS = {
     "xyranet_api_base_url": "🔗",
     "xyranet_api_key": "🔑",
     "xyranet_timeout_seconds": "⏱",
-    "marketplace_webhook_secret": "🪝",
     "digiseller_seller_id": "🏪",
     "digiseller_api_key": "🔑",
     "ggsel_seller_id": "🛍",

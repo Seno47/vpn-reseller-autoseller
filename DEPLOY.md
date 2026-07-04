@@ -1,32 +1,33 @@
-# Deploy Guide
+# Подробная инструкция
 
-This project is designed to run safely on a VPS or a local Windows machine.
+Эта инструкция для владельца или менеджера магазина. Здесь только то, что нужно для установки, настройки и ежедневной работы.
 
-## Security model
+## 1. Что нужно подготовить
 
-The application must listen on `127.0.0.1`, not on a public interface.
+Перед установкой подготовьте:
 
-```env
-APP_HOST=127.0.0.1
-APP_PORT=8095
-```
+- `XyraNet API key` от XyraNet Wholesale.
+- `Telegram bot token` от BotFather.
+- Ваш `Telegram ID`, чтобы вы стали главным админом бота.
+- `Digiseller seller ID` и `Digiseller API key`, если продаёте на Plati.Market/Digiseller.
+- `GGsel seller ID` и `GGsel API key`, если продаёте на GGsel.
+- Домен, если хотите открывать панель по адресу вида `https://panel.example.com`.
 
-Do not publish port `8095` to the Internet. Public access should be one of:
+Если домена или выделенного IP нет, панель всё равно можно открыть через SSH-туннель. Это описано ниже.
 
-- domain + HTTPS reverse proxy;
-- no domain/no public IP + SSH tunnel.
+## 2. Установка на Ubuntu сервер
 
-If Telegram is blocked or unavailable, the web panel and marketplace processing stay online. Telegram polling runs in a supervisor task and retries with backoff.
+### Вариант A. Репозиторий публичный
 
-## Fast Ubuntu install
-
-For a public repository, the one-command install form is:
+На сервере выполните:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Seno47/vpn-reseller-autoseller/main/scripts/install-linux.sh | sudo env REPO_URL=https://github.com/Seno47/vpn-reseller-autoseller.git bash
 ```
 
-For a private repository, clone it first with an authorized GitHub account:
+### Вариант B. Репозиторий приватный
+
+Сначала войдите на сервер под аккаунтом, у которого есть доступ к репозиторию, затем:
 
 ```bash
 git clone https://github.com/Seno47/vpn-reseller-autoseller.git
@@ -34,101 +35,75 @@ cd vpn-reseller-autoseller
 sudo bash scripts/install-linux.sh
 ```
 
-The installer asks for:
+### Что спросит установщик
 
-- web panel login and password;
-- Telegram bot token;
-- Telegram admin ID;
-- XyraNet API key, or leave empty and fill it in the panel later;
-- Digiseller/GGsel keys, optional;
-- whether a domain is used;
-- domain and Let's Encrypt email when HTTPS is enabled.
+Установщик будет задавать вопросы. Заполняйте так:
 
-The installer creates:
+| Вопрос | Что ввести |
+| --- | --- |
+| `Web panel login` | Логин для входа в веб-панель, например `admin`. |
+| `Web panel password` | Надёжный пароль для веб-панели. |
+| `Telegram bot token` | Токен бота от BotFather. Можно оставить пустым и заполнить позже в панели. |
+| `Telegram admin ID` | Ваш Telegram ID. Это обязательное поле. |
+| `XyraNet API key` | Ключ XyraNet. Можно оставить пустым и заполнить позже в панели. |
+| `Digiseller seller ID` | ID продавца Digiseller. Если пока не используете Digiseller, оставьте пустым. |
+| `Digiseller API key` | API key Digiseller. Если пока не используете Digiseller, оставьте пустым. |
+| `GGsel seller ID` | ID продавца GGsel. Если пока не используете GGsel, оставьте пустым. |
+| `GGsel API key` | API key GGsel. Если пока не используете GGsel, оставьте пустым. |
+| `Use domain with HTTPS?` | Введите `yes`, если есть домен. Введите `no`, если домена нет. |
+| `Domain name` | Домен панели, например `panel.example.com`. |
+| `Email for Let's Encrypt` | Почта для выпуска HTTPS-сертификата. |
 
-- `/opt/xyranet-reseller-autoseller`;
-- `.env` with generated `ADMIN_TOKEN` and `MARKETPLACE_WEBHOOK_SECRET`;
-- Python virtual environment;
-- systemd service `xyranet-reseller-autoseller`;
-- optional nginx + Let's Encrypt HTTPS config.
+После установки установщик покажет адрес панели или команду для SSH-туннеля.
 
-Useful commands:
+## 3. Как открыть панель
 
-```bash
-sudo systemctl status xyranet-reseller-autoseller
-sudo journalctl -u xyranet-reseller-autoseller -f
-sudo systemctl restart xyranet-reseller-autoseller
-```
+### Если есть домен
 
-## Ubuntu with domain
-
-Point DNS `A`/`AAAA` records to the server, run the installer, choose `yes` for domain.
-
-The panel URL will be:
+Откройте в браузере:
 
 ```text
-https://your-domain.example
+https://ваш-домен
 ```
 
-Webhook examples:
+Например:
 
 ```text
-https://your-domain.example/webhooks/plati?secret=YOUR_WEBHOOK_SECRET
-https://your-domain.example/webhooks/ggsel?secret=YOUR_WEBHOOK_SECRET
-https://your-domain.example/webhooks/plati/text?secret=YOUR_WEBHOOK_SECRET
+https://panel.example.com
 ```
 
-The web panel is not served directly over plain HTTP. nginx only redirects HTTP to HTTPS for the domain and the Python app remains bound to `127.0.0.1`.
+### Если домена нет
 
-If you need port 80 completely closed after certificate issue, you can close it in the firewall, but then Let's Encrypt HTTP renewal will need another validation method.
-
-## Ubuntu without domain or dedicated public IP
-
-Do not expose nginx. Keep the app on localhost and connect with SSH tunneling:
+На своём компьютере выполните:
 
 ```bash
 ssh -L 8095:127.0.0.1:8095 user@server
 ```
 
-Then open on your local computer:
+Где:
+
+- `user` - имя пользователя на сервере;
+- `server` - IP или адрес сервера.
+
+После этого откройте на своём компьютере:
 
 ```text
 http://127.0.0.1:8095
 ```
 
-This HTTP connection is local between your browser and your own computer. The traffic to the server goes through SSH encryption. Nobody on the Internet can open the panel unless they can SSH into the server.
+Это нормально: в браузере будет `http://127.0.0.1`, но соединение до сервера идёт через SSH.
 
-If your SSH server is not on port 22:
+Если SSH на другом порту:
 
 ```bash
 ssh -p 2222 -L 8095:127.0.0.1:8095 user@server
 ```
 
-If the server is behind NAT and has no incoming SSH access, use one of these:
+## 4. Установка на Windows для локальной проверки
 
-- provider console/VPN to the private network;
-- reverse SSH tunnel from the server to your machine;
-- Tailscale/ZeroTier private network;
-- Cloudflare Tunnel, but protect it with Cloudflare Access or equivalent authentication.
-
-Reverse SSH example, run on the server:
-
-```bash
-ssh -N -R 18095:127.0.0.1:8095 your-user@your-public-machine
-```
-
-Then on `your-public-machine` open:
-
-```text
-http://127.0.0.1:18095
-```
-
-## Windows local run
-
-PowerShell:
+Откройте PowerShell в папке проекта:
 
 ```powershell
-cd C:\path\to\vpn-reseller-autoseller
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -137,65 +112,353 @@ notepad .env
 python run.py
 ```
 
-Open:
+В файле `.env` заполните хотя бы:
+
+- `XYRANET_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `ADMIN_IDS`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- `ADMIN_TOKEN`
+- `DIGISELLER_SELLER_ID` и `DIGISELLER_API_KEY`, если проверяете Digiseller
+- `GGSEL_SELLER_ID` и `GGSEL_API_KEY`, если проверяете GGsel
+
+После запуска откройте:
 
 ```text
 http://127.0.0.1:8095
 ```
 
-Recommended Windows `.env` basics:
+## 5. Первый вход
 
-```env
-APP_HOST=127.0.0.1
-APP_PORT=8095
-XYRANET_API_BASE_URL=https://xyranet.pro/api/wholesale
-TELEGRAM_BOT_TOKEN=your_bot_token
-ADMIN_IDS=1606617935
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=strong-password
-ADMIN_TOKEN=random-long-token
-MARKETPLACE_WEBHOOK_SECRET=random-long-secret
-DATABASE_PATH=data/reseller.sqlite3
-ENABLE_TELEGRAM=true
-```
+1. Откройте панель.
+2. Введите логин и пароль, которые указали при установке.
+3. Нажмите “Войти”.
 
-## GitHub publishing
+Если пароль потерян, проще всего поменять его в `.env` на сервере и перезапустить сервис.
 
-The repository must not contain real secrets or the production database.
+## 6. Настройки
 
-Before pushing:
+Откройте вкладку “Настройки”.
+
+![Настройки](docs/screenshots/05-settings-masked.png)
+
+Заполните:
+
+- `XyraNet API URL` - оставьте `https://xyranet.pro/api/wholesale`.
+- `XyraNet API key` - ключ XyraNet.
+- `Digiseller seller ID` и `Digiseller API key` - если используете Plati.Market/Digiseller.
+- `GGsel seller ID` и `GGsel API key` - если используете GGsel.
+- `Telegram enabled` - включено, если нужен Telegram-бот.
+- `Telegram bot token` - токен от BotFather.
+- Уведомления - включите те, которые хотите получать.
+- `Free reissue command` - включите, если хотите разрешить бесплатный перевыпуск по команде в чате заказа.
+
+После изменения Telegram token или включения/отключения Telegram нажмите “Рестарт Telegram-бота” в панели.
+
+Важно:
+
+- Если Digiseller-поля пустые, Plati.Market/Digiseller просто не будет обрабатываться.
+- Если GGsel-поля пустые, GGsel просто не будет обрабатываться.
+- В маркетплейсах не нужно настраивать дополнительные адреса уведомлений о продаже.
+
+## 7. Диагностика
+
+После настроек откройте вкладку “Диагностика”.
+
+![Диагностика](docs/screenshots/04-diagnostics.png)
+
+Нажмите проверки:
+
+- `XyraNet API` - должен подтвердить, что ключ XyraNet работает.
+- `Digiseller API` - проверяйте после заполнения Digiseller.
+- `GGsel` - проверяйте после заполнения GGsel.
+- `Telegram` - отправит тестовое уведомление админам.
+
+Если проверка не прошла, сначала исправьте ключи в настройках, потом проверьте ещё раз.
+
+## 8. Маппинг товаров
+
+Маппинг говорит панели: “если купили вот этот лот/кнопку, нужно выполнить вот это действие и выдать вот такой тариф”.
+
+Откройте вкладку “Маппинг”.
+
+![Маппинг товаров](docs/screenshots/01-mapping.png)
+
+### Как добавить товар
+
+1. В поле “Ссылка / данные лота” вставьте ссылку на лот Plati/GGsel или данные лота.
+2. Нажмите “Распарсить”.
+3. Проверьте площадку и ID лота.
+4. В поле “Кнопка / вариант” выберите кнопку из списка.
+5. Выберите действие:
+   - `Покупка` - новая подписка.
+   - `Продление` - продлить существующий заказ.
+   - `Перевыпуск` - перевыпустить подписку.
+   - `LTE-трафик` - докупить LTE-квоту.
+   - `IP-лимит` - докупить лимит устройств/IP.
+6. Выберите тариф из выпадающего списка.
+7. Заполните параметры действия, если они появились.
+8. Введите понятное название, например `LITE 30 дней`.
+9. Нажмите “Сохранить”.
+
+После сохранения форма не сбрасывается. Это удобно: можно выбрать следующую кнопку того же лота и сохранить её.
+
+### Как заполнить все кнопки одного лота
+
+1. Вставьте ссылку на лот.
+2. Нажмите “Распарсить”.
+3. Выберите первую кнопку.
+4. Выберите тариф и действие.
+5. Нажмите “Сохранить”.
+6. Выберите следующую кнопку.
+7. Повторите до конца списка.
+
+Уже добавленные кнопки убираются из выбора, чтобы не запутаться.
+
+### Как исправить или удалить маппинг
+
+В списке готового маппинга:
+
+- используйте поиск, чтобы найти лот;
+- нажмите редактирование, если нужно поменять действие/тариф/название;
+- нажмите удаление, если маппинг больше не нужен.
+
+## 9. Как выбирать действие
+
+### Покупка
+
+Используйте для новых подписок. Покупатель оплачивает лот, панель создаёт новый заказ XyraNet и отправляет ссылку подписки.
+
+Если покупатель купил несколько штук одного товара, панель выдаёт одну подписку и продлевает её на нужное количество периодов.
+
+### Продление
+
+Лучший вариант - отдельный лот “Продление”.
+
+Покупатель оплачивает лот, затем в чате заказа пишет ID своего заказа XyraNet или команду, которую вы указали в шаблоне. После этого панель продлевает подписку.
+
+### LTE-трафик
+
+Лучший вариант - отдельный лот “LTE-трафик”.
+
+В параметрах укажите объём, например `10 ГБ`. Покупатель после оплаты пишет ID заказа, к которому нужно добавить трафик.
+
+### IP-лимит
+
+Лучший вариант - отдельный лот “Дополнительные устройства/IP”.
+
+В параметрах укажите количество или срок, который нужен для вашего тарифа. Покупатель после оплаты пишет ID заказа.
+
+### Перевыпуск
+
+Перевыпуск можно сделать:
+
+- бесплатным по команде в чате заказа;
+- платным отдельным лотом.
+
+Если бесплатный перевыпуск включён, покупатель сможет написать команду в чате заказа. Текст команды меняется в шаблонах.
+
+## 10. Шаблоны сообщений
+
+Откройте вкладку “Шаблоны”.
+
+![Шаблоны сообщений](docs/screenshots/02-templates.png)
+
+Здесь редактируются сообщения, которые уходят покупателю в чат маркетплейса.
+
+Шаблоны разделены по действиям:
+
+- покупка;
+- продление;
+- перевыпуск;
+- LTE-трафик;
+- IP-лимит;
+- ожидание ID заказа;
+- успешное выполнение;
+- ошибка;
+- подсказка по командам.
+
+Можно менять:
+
+- текст выдачи после покупки;
+- просьбу прислать ID заказа;
+- текст успешного продления;
+- текст ошибки;
+- команды, которые покупатель должен писать в чате.
+
+Не удаляйте переменные, если они нужны в сообщении:
+
+- `{SUBSCRIPTION_LINK}` - ссылка подписки;
+- `{ORDER_ID}` - ID заказа;
+- `{TARIFF_NAME}` - название тарифа;
+- `{EXPIRE_DATE}` - дата окончания;
+- `{DEVICE_LIMIT}` - лимит устройств/IP;
+- `{LTE_QUOTA}` - LTE-квота;
+- `{COMMAND_HELP}` - большая подсказка по командам.
+
+## 11. Переменные
+
+Откройте вкладку “Переменные”, если хотите менять большие блоки текста отдельно от основных шаблонов.
+
+Например, можно отдельно настроить `{COMMAND_HELP}` и вставлять его в разные шаблоны.
+
+Также можно создать свою переменную и собрать её из обычных переменных. Это удобно, если один и тот же блок текста повторяется в нескольких сообщениях.
+
+## 12. Продажи
+
+Вкладка “Продажи” показывает реальные заказы.
+
+Здесь можно:
+
+- увидеть, что заказ получен;
+- увидеть, выдан ли доступ;
+- открыть историю событий;
+- повторно отправить сохранённую выдачу покупателю;
+- понять, почему заказ ждёт ID заказа.
+
+Если покупатель пишет “ничего не пришло”, сначала проверьте эту вкладку.
+
+## 13. Статистика
+
+Откройте вкладку “Статистика”.
+
+![Статистика](docs/screenshots/03-statistics.png)
+
+Здесь видно:
+
+- количество продаж;
+- сумму продаж;
+- расходы на XyraNet;
+- прибыль;
+- средний заказ;
+- разбивку по площадкам;
+- разбивку по действиям;
+- разбивку по тарифам;
+- динамику по дням.
+
+Выберите период: сегодня, вчера, 7 дней, 30 дней, 90 дней или всё время.
+
+## 14. Telegram-бот для админов
+
+Telegram-бот нужен не покупателям, а вам и администраторам.
+
+Он может:
+
+- присылать уведомления о новых покупках;
+- присылать сообщения из чатов маркетплейсов;
+- показывать статистику;
+- помогать управлять настройками;
+- показывать pending-операции;
+- перезапускать Telegram-бота после изменения настроек.
+
+Покупатель не должен писать в Telegram-бота. Вся переписка покупателя идёт в чате Plati.Market/Digiseller или GGsel.
+
+## 15. Пользователи Telegram-бота
+
+В настройках можно добавить пользователей, которым разрешён доступ к Telegram-боту.
+
+Главный админ, указанный при установке в `ADMIN_IDS`, защищён:
+
+- его нельзя отключить;
+- его нельзя удалить;
+- добавлять других пользователей могут только админы из `ADMIN_IDS`.
+
+## 16. Проверка тестовой покупки
+
+Перед реальными продажами сделайте тест.
+
+### Plati.Market/Digiseller
+
+1. Проверьте, что заполнены Digiseller seller ID и API key.
+2. Проверьте Digiseller во вкладке “Диагностика”.
+3. Добавьте маппинг нужного лота и кнопки.
+4. Сделайте тестовую покупку.
+5. Отправьте уникальный код покупки в чат заказа на Plati.Market/Digiseller.
+6. Проверьте, что панель отправила подписку в тот же чат.
+7. Проверьте вкладку “Продажи”.
+
+### GGsel
+
+1. Проверьте, что заполнены GGsel seller ID и API key.
+2. Проверьте GGsel во вкладке “Диагностика”.
+3. Добавьте маппинг нужного лота и кнопки.
+4. Сделайте тестовую покупку.
+5. Подождите один цикл обработки.
+6. Проверьте, что панель отправила подписку в чат GGsel.
+7. Проверьте вкладку “Продажи”.
+
+## 17. Если заказ не обработался
+
+Проверьте по порядку:
+
+1. Заполнены ли ключи нужной площадки.
+2. Проходит ли проверка площадки во вкладке “Диагностика”.
+3. Есть ли маппинг для этого лота и кнопки.
+4. Включён ли маппинг.
+5. Правильно ли выбрано действие.
+6. Не ждёт ли заказ ID заказа во вкладке “Продажи” или “Диагностика”.
+7. Есть ли ошибка в истории событий заказа.
+8. Для Plati.Market/Digiseller: отправил ли покупатель уникальный код именно в чат заказа маркетплейса.
+9. Для GGsel: совпадает ли ID лота/кнопки в маппинге с тем, что пришло в заказе.
+
+## 18. Резервная копия
+
+Во вкладке “Диагностика” есть скачивание базы.
+
+Скачивайте резервную копию:
+
+- перед обновлением;
+- после массовой настройки маппинга;
+- регулярно, если идут реальные продажи.
+
+В базе хранятся продажи, выдачи, настройки, pending-операции и история событий.
+
+## 19. Обновление на сервере
+
+Если проект установлен через GitHub:
 
 ```bash
-git init
-git add .
-git status
-git commit -m "Initial autoseller release"
-git branch -M main
-git remote add origin https://github.com/OWNER/REPO.git
-git push -u origin main
+cd /opt/xyranet-reseller-autoseller
+sudo git pull
+sudo systemctl restart xyranet-reseller-autoseller
 ```
 
-Check that these files are not staged:
+После обновления:
+
+1. Откройте панель.
+2. Проверьте “Диагностику”.
+3. Проверьте, что Telegram-бот работает.
+4. Сделайте тестовую продажу или тестовую отправку уведомления.
+
+## 20. Полезные команды на сервере
+
+Проверить состояние:
 
 ```bash
-git status --ignored
+sudo systemctl status xyranet-reseller-autoseller
 ```
 
-`.env`, logs, virtualenv, and SQLite DB files are ignored by `.gitignore`.
+Посмотреть журнал:
 
-## Telegram blocked or unavailable
+```bash
+sudo journalctl -u xyranet-reseller-autoseller -f
+```
 
-The FastAPI web panel starts independently from Telegram.
-
-If Telegram polling fails:
-
-- the web panel remains available;
-- marketplace polling/webhooks continue;
-- the bot supervisor logs the error and retries;
-- `/admin/api/status` includes Telegram running state and last error.
-
-Restart only Telegram from the panel if needed, or restart the whole service:
+Перезапустить:
 
 ```bash
 sudo systemctl restart xyranet-reseller-autoseller
 ```
+
+## 21. Главное правило безопасности
+
+Не публикуйте:
+
+- `.env`;
+- API-ключи;
+- Telegram token;
+- базу данных;
+- логи с данными заказов.
+
+В GitHub должны попадать только файлы проекта без секретов.

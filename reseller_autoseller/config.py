@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "change-me"
     admin_token: str = "change-me"
-    marketplace_webhook_secret: str = ""
 
     database_path: str = "data/reseller.sqlite3"
     enable_telegram: bool = True

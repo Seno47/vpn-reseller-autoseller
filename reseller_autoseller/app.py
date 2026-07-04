@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -28,7 +28,7 @@ from reseller_autoseller.digiseller_client import (
 )
 from reseller_autoseller.lot_parser import extract_product_id, is_allowed_lot_url, parse_lot_html
 from reseller_autoseller.marketplaces import SUPPORTED_MARKETPLACES, normalize_sale
-from reseller_autoseller.marketplace_chat import GgselChatClient, MarketplaceMessenger
+from reseller_autoseller.marketplace_chat import MarketplaceMessenger, RuntimeGgselClient
 from reseller_autoseller.notifications import TelegramNotifier, compact_text, sale_title
 from reseller_autoseller.runtime_config import RuntimeConfig, RuntimeXyraNetClient
 from reseller_autoseller.services import (
@@ -117,12 +117,10 @@ def create_app() -> FastAPI:
     notifier = TelegramNotifier(runtime)
     xyranet = RuntimeXyraNetClient(runtime)
     digiseller = RuntimeDigisellerClient(runtime)
+    ggsel = RuntimeGgselClient(runtime)
     messenger = MarketplaceMessenger(
         digiseller=digiseller,
-        ggsel=GgselChatClient(
-            api_key=runtime.get_text("ggsel_api_key"),
-            timeout=runtime.get_float("xyranet_timeout_seconds"),
-        ),
+        ggsel=ggsel,
     )
     delivery_service = DeliveryService(
         db=db,
@@ -136,6 +134,7 @@ def create_app() -> FastAPI:
     bot_lock = asyncio.Lock()
     bot_last_error = ""
     recent_notifications: dict[str, float] = {}
+    poll_error_notifications: dict[str, float] = {}
 
     def notify_admins(text: str, kind: str = "errors") -> None:
         setting_key = f"notify_{kind}"
@@ -260,11 +259,65 @@ def create_app() -> FastAPI:
                 return str(message[key])
         return ""
 
+    def pick_recursive(payload: Any, *keys: str) -> str:
+        key_set = {key.lower() for key in keys}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key.lower() in key_set and value not in (None, ""):
+                    return str(value).strip()
+                found = pick_recursive(value, *keys)
+                if found:
+                    return found
+        if isinstance(payload, list):
+            for item in payload:
+                found = pick_recursive(item, *keys)
+                if found:
+                    return found
+        return ""
+
     def chat_invoice_id(chat: dict[str, Any]) -> str:
         for key in ("id_i", "invoice_id", "inv", "order_id"):
             if chat.get(key) not in (None, ""):
                 return str(chat[key])
         return ""
+
+    def ggsel_order_id(payload: dict[str, Any]) -> str:
+        return pick_recursive(
+            payload,
+            "invoice_id",
+            "invoiceId",
+            "invoice",
+            "order_id",
+            "orderId",
+            "purchase_id",
+            "purchaseId",
+            "id",
+        )
+
+    def merge_sale_payload(summary: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+        detail_data = detail.get("data") if isinstance(detail.get("data"), dict) else {}
+        result = {**summary, **detail, **detail_data}
+        result["raw_sale"] = summary
+        result["raw_order"] = detail
+        return result
+
+    def digiseller_polling_configured() -> bool:
+        return bool(runtime.get_text("digiseller_seller_id") and runtime.get_text("digiseller_api_key"))
+
+    def marketplace_messages_configured(marketplace: str) -> bool:
+        if marketplace in {"plati", "digiseller"}:
+            return digiseller_polling_configured()
+        if marketplace == "ggsel":
+            return ggsel.configured_for_polling()
+        return False
+
+    def log_poll_error(key: str, message: str) -> None:
+        now = time.monotonic()
+        last = poll_error_notifications.get(key, 0)
+        if now - last < 300:
+            return
+        poll_error_notifications[key] = now
+        log.exception(message)
 
     def sale_chat_id(sale: dict[str, Any]) -> str:
         if str(sale.get("marketplace") or "") in {"plati", "digiseller"}:
@@ -458,10 +511,12 @@ def create_app() -> FastAPI:
             return True
 
     async def poll_digiseller_unique_code_chats() -> None:
+        if not digiseller_polling_configured():
+            return
         try:
             chats = await digiseller.order_chats(filter_new=True, rows=100)
         except Exception:
-            log.exception("Cannot read Digiseller unread chats")
+            log_poll_error("digiseller_chats", "Cannot read Digiseller unread chats")
             return
         for chat in chats:
             invoice_id = chat_invoice_id(chat)
@@ -476,13 +531,13 @@ def create_app() -> FastAPI:
                     old_id=last_seen,
                 )
             except Exception:
-                log.exception("Cannot read Digiseller messages for %s", invoice_id)
+                log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}")
                 continue
             if not messages and last_seen:
                 try:
                     await digiseller.mark_order_messages_seen(invoice_id)
                 except Exception:
-                    log.exception("Cannot mark Digiseller chat as seen for %s", invoice_id)
+                    log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
                 continue
             last_message = last_seen
             handled = False
@@ -508,13 +563,78 @@ def create_app() -> FastAPI:
                 try:
                     await digiseller.mark_order_messages_seen(invoice_id)
                 except Exception:
-                    log.exception("Cannot mark Digiseller chat as seen for %s", invoice_id)
+                    log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+
+    async def poll_ggsel_sales() -> None:
+        if not ggsel.configured_for_polling():
+            return
+        cursor_key = "_last_sales"
+        try:
+            sales = await ggsel.last_sales()
+        except Exception:
+            log_poll_error("ggsel_sales", "Cannot read GGsel last sales")
+            return
+        sales = [sale for sale in sales if ggsel_order_id(sale)]
+        if not sales:
+            return
+        newest_order_id = ggsel_order_id(sales[0])
+        last_seen = db.get_chat_cursor("ggsel", cursor_key)
+        if not last_seen:
+            db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
+            db.add_order_event(
+                marketplace="ggsel",
+                external_order_id=newest_order_id,
+                event_type="polling_cursor_initialized",
+                payload={"visible_sales": len(sales)},
+            )
+            return
+
+        pending_sales = []
+        for sale in sales:
+            order_id = ggsel_order_id(sale)
+            if order_id == last_seen:
+                break
+            pending_sales.append(sale)
+        if not pending_sales:
+            return
+
+        for sale in reversed(pending_sales):
+            order_id = ggsel_order_id(sale)
+            try:
+                detail = await ggsel.order_info(order_id)
+            except Exception:
+                log_poll_error("ggsel_order_info", f"Cannot read GGsel order info for {order_id}")
+                detail = {}
+            payload = merge_sale_payload(sale, detail)
+            try:
+                event = normalize_sale("ggsel", payload)
+                result = await delivery_service.handle_sale(event)
+                notify_admins(sale_notification_text(result, source="GGsel polling"), kind="new_purchases")
+            except Exception as exc:
+                db.add_order_event(
+                    marketplace="ggsel",
+                    external_order_id=order_id,
+                    event_type="polling_sale_failed",
+                    status="error",
+                    message=str(exc),
+                    payload=payload,
+                )
+                notify_admins(
+                    "🚨 <b>Ошибка обработки продажи GGsel</b>\n"
+                    f"Заказ: <code>{escape(order_id)}</code>\n"
+                    f"Ошибка: <code>{escape(str(exc))}</code>",
+                    kind="errors",
+                )
+        db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
 
     async def poll_marketplace_chats() -> None:
         while True:
             try:
                 await poll_digiseller_unique_code_chats()
+                await poll_ggsel_sales()
                 for operation in db.list_pending_operations():
+                    if not marketplace_messages_configured(str(operation["marketplace"])):
+                        continue
                     messages = await messenger.order_messages(
                         str(operation["marketplace"]),
                         str(operation["external_order_id"]),
@@ -748,24 +868,6 @@ def create_app() -> FastAPI:
             token = authorization[7:].strip()
         if not token or token != settings.admin_token:
             raise HTTPException(status_code=401, detail="Invalid admin token")
-
-    def check_webhook_secret(request: Request) -> None:
-        webhook_secret = runtime.get_text("marketplace_webhook_secret")
-        if not webhook_secret:
-            return
-        provided = request.query_params.get("secret") or request.headers.get("X-Webhook-Secret") or ""
-        if provided != webhook_secret:
-            raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
-    async def parse_payload(request: Request) -> dict[str, Any]:
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            payload = await request.json()
-            if not isinstance(payload, dict):
-                raise HTTPException(status_code=400, detail="JSON object expected")
-            return payload
-        form = await request.form()
-        return {key: str(value) for key, value in form.items()}
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -1125,9 +1227,13 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/api/smoke-tests/ggsel", dependencies=[Depends(require_admin)])
     async def admin_smoke_ggsel() -> dict[str, Any]:
-        if not runtime.get_text("ggsel_api_key"):
-            return {"status": "error", "detail": "GGsel API key is not configured"}
-        return {"status": "ok", "detail": "GGsel API key is configured. Send/read checks require a real order chat."}
+        if not ggsel.configured_for_polling():
+            return {"status": "error", "detail": "GGsel seller ID/API key are not configured"}
+        try:
+            await ggsel.token()
+            return {"status": "ok", "detail": "GGsel token received"}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
 
     @app.post("/admin/api/smoke-tests/telegram", dependencies=[Depends(require_admin)])
     async def admin_smoke_telegram() -> dict[str, Any]:
@@ -1183,31 +1289,5 @@ def create_app() -> FastAPI:
         if not db.delete_bot_user(telegram_id):
             raise HTTPException(status_code=404, detail="Bot user not found")
         return {"status": "deleted"}
-
-    async def process_webhook(marketplace: str, request: Request) -> dict[str, Any]:
-        check_webhook_secret(request)
-        payload = await parse_payload(request)
-        try:
-            event = normalize_sale(marketplace, payload)
-            result = await delivery_service.handle_sale(event)
-            notify_admins(sale_notification_text(result, source=f"{marketplace} webhook"))
-            return result
-        except ValueError as exc:
-            notify_admins(
-                "⚠️ <b>Webhook не обработан</b>\n"
-                f"Площадка: <b>{escape(marketplace)}</b>\n"
-                f"Ошибка: <code>{escape(str(exc))}</code>"
-            )
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/webhooks/{marketplace}")
-    async def marketplace_webhook(marketplace: str, request: Request) -> JSONResponse:
-        result = await process_webhook(marketplace, request)
-        return JSONResponse(result)
-
-    @app.post("/webhooks/{marketplace}/text")
-    async def marketplace_webhook_text(marketplace: str, request: Request) -> Response:
-        result = await process_webhook(marketplace, request)
-        return PlainTextResponse(result["delivery_text"])
 
     return app

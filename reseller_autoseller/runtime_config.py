@@ -23,7 +23,6 @@ SETTING_DEFINITIONS = [
     SettingDefinition("xyranet_api_base_url", "XyraNet API URL"),
     SettingDefinition("xyranet_api_key", "XyraNet API key", sensitive=True),
     SettingDefinition("xyranet_timeout_seconds", "XyraNet timeout", kind="number"),
-    SettingDefinition("marketplace_webhook_secret", "Webhook secret", sensitive=True),
     SettingDefinition("digiseller_seller_id", "Digiseller seller ID"),
     SettingDefinition("digiseller_api_key", "Digiseller API key", sensitive=True),
     SettingDefinition("ggsel_seller_id", "GGsel seller ID"),

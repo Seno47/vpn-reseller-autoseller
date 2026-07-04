@@ -21,10 +21,24 @@ class SaleEvent:
 
 
 def _pick(payload: dict[str, Any], *keys: str) -> str | None:
+    key_set = {key.lower() for key in keys}
     for key in keys:
         value = payload.get(key)
-        if value is not None and str(value).strip():
+        if value is not None and not isinstance(value, (dict, list)) and str(value).strip():
             return str(value).strip()
+    for key, value in payload.items():
+        if key.lower() in key_set and value is not None and not isinstance(value, (dict, list)) and str(value).strip():
+            return str(value).strip()
+        if isinstance(value, dict):
+            found = _pick(value, *keys)
+            if found:
+                return found
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    found = _pick(item, *keys)
+                    if found:
+                        return found
     return None
 
 
@@ -50,6 +64,10 @@ def normalize_sale(marketplace: str, payload: dict[str, Any]) -> SaleEvent:
         "orderId",
         "sale_id",
         "saleId",
+        "purchase_id",
+        "purchaseId",
+        "invoice_id",
+        "invoiceId",
         "id",
         "uniquecode",
         "unique_code",
@@ -65,6 +83,11 @@ def normalize_sale(marketplace: str, payload: dict[str, Any]) -> SaleEvent:
         "itemId",
         "offer_id",
         "offerId",
+        "id_good",
+        "idGoods",
+        "id_product",
+        "good_id",
+        "goodId",
         "variant_id",
         "variantId",
         "permalink",
@@ -82,11 +105,13 @@ def normalize_sale(marketplace: str, payload: dict[str, Any]) -> SaleEvent:
         "selection_id",
         "selectionId",
         "sku",
+        "variant",
+        "option",
     )
     if not order_id:
-        raise ValueError("Cannot find marketplace order id in webhook payload")
+        raise ValueError("Cannot find marketplace order id in sale payload")
     if not product_id:
-        raise ValueError("Cannot find marketplace product id in webhook payload")
+        raise ValueError("Cannot find marketplace product id in sale payload")
     return SaleEvent(
         marketplace=marketplace,
         external_order_id=order_id,
