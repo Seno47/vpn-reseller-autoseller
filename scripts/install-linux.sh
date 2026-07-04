@@ -62,6 +62,7 @@ ADMIN_PASSWORD=${ADMIN_PASSWORD}
 ADMIN_TOKEN=${ADMIN_TOKEN}
 
 DATABASE_PATH=data/reseller.sqlite3
+PANEL_LANGUAGE=${PANEL_LANGUAGE}
 ENABLE_TELEGRAM=true
 LOG_LEVEL=INFO
 EOF_ENV
@@ -154,6 +155,13 @@ fi
 ADMIN_USERNAME="$(ask "Web panel login" "admin")"
 ADMIN_PASSWORD="$(ask_secret "Web panel password")"
 while [ "${#ADMIN_PASSWORD}" -lt 8 ]; do ADMIN_PASSWORD="$(ask_secret "Web panel password must be at least 8 characters")"; done
+
+PANEL_LANGUAGE="$(ask "Interface and Telegram bot language: ru/en" "ru")"
+PANEL_LANGUAGE="$(printf '%s' "$PANEL_LANGUAGE" | tr '[:upper:]' '[:lower:]')"
+while [ "$PANEL_LANGUAGE" != "ru" ] && [ "$PANEL_LANGUAGE" != "en" ]; do
+  PANEL_LANGUAGE="$(ask "Language must be ru or en" "ru")"
+  PANEL_LANGUAGE="$(printf '%s' "$PANEL_LANGUAGE" | tr '[:upper:]' '[:lower:]')"
+done
 
 TELEGRAM_BOT_TOKEN="$(ask_secret "Telegram bot token (can be empty)")"
 ADMIN_IDS="$(ask "Telegram admin ID, comma separated" "")"

@@ -39,6 +39,14 @@ from reseller_autoseller.xyra_client import XyraNetClient
 UNIQUE_CODE_RE = re.compile(r"^[A-Za-z0-9]{16}$")
 
 
+def tr(language: str, ru: str, en: str) -> str:
+    return en if language == "en" else ru
+
+
+def runtime_language(runtime: RuntimeConfig) -> str:
+    return runtime.language()
+
+
 class MappingState(StatesGroup):
     waiting_payload = State()
     waiting_template = State()
@@ -52,36 +60,38 @@ class SettingState(StatesGroup):
     waiting_value = State()
 
 
-def main_menu(is_owner: bool) -> InlineKeyboardMarkup:
+def main_menu(is_owner: bool, language: str = "ru") -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
-            InlineKeyboardButton(text="🖥 Метрики", callback_data="menu:system"),
+            InlineKeyboardButton(text=tr(language, "📊 Статус", "📊 Status"), callback_data="menu:status"),
+            InlineKeyboardButton(text=tr(language, "🖥 Метрики", "🖥 Metrics"), callback_data="menu:system"),
         ],
         [
-            InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance"),
-            InlineKeyboardButton(text="📈 Статистика", callback_data="stats:period:30d"),
+            InlineKeyboardButton(text=tr(language, "💰 Баланс", "💰 Balance"), callback_data="menu:balance"),
+            InlineKeyboardButton(text=tr(language, "📈 Статистика", "📈 Statistics"), callback_data="stats:period:30d"),
         ],
         [
-            InlineKeyboardButton(text="🧾 Товары", callback_data="menu:products"),
-            InlineKeyboardButton(text="📦 Продажи", callback_data="menu:sales"),
+            InlineKeyboardButton(text=tr(language, "🧾 Товары", "🧾 Products"), callback_data="menu:products"),
+            InlineKeyboardButton(text=tr(language, "📦 Продажи", "📦 Sales"), callback_data="menu:sales"),
         ],
         [
-            InlineKeyboardButton(text="🧭 Тарифы", callback_data="menu:tariffs"),
-            InlineKeyboardButton(text="➕ Маппинг", callback_data="map:add"),
+            InlineKeyboardButton(text=tr(language, "🧭 Тарифы", "🧭 Tariffs"), callback_data="menu:tariffs"),
+            InlineKeyboardButton(text=tr(language, "➕ Маппинг", "➕ Mapping"), callback_data="map:add"),
         ],
         [
-            InlineKeyboardButton(text="📝 Шаблоны", callback_data="menu:templates"),
-            InlineKeyboardButton(text="👥 Доступы", callback_data="menu:users"),
+            InlineKeyboardButton(text=tr(language, "📝 Шаблоны", "📝 Templates"), callback_data="menu:templates"),
+            InlineKeyboardButton(text=tr(language, "👥 Доступы", "👥 Access"), callback_data="menu:users"),
         ],
     ]
     if is_owner:
-        rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
+        rows.append([InlineKeyboardButton(text=tr(language, "⚙️ Настройки", "⚙️ Settings"), callback_data="menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def back_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")]])
+def back_menu(language: str = "ru", callback_data: str = "menu:home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data=callback_data)]]
+    )
 
 
 def user_id(message: Message | CallbackQuery) -> int | None:
@@ -96,12 +106,12 @@ def format_product_key(row: dict) -> str:
     return key
 
 
-def format_tariff_label(row: dict[str, Any]) -> str:
+def format_tariff_label(row: dict[str, Any], language: str = "ru") -> str:
     code = str(row.get("code") or "")
     family = str(row.get("family_code") or code.split("_")[0] or "tariff").upper()
-    period = f"{row.get('duration_days')} дн" if row.get("duration_days") else str(row.get("period_key") or "")
+    period = f"{row.get('duration_days')} {tr(language, 'дн', 'days')}" if row.get("duration_days") else str(row.get("period_key") or "")
     ip = f"{row.get('ip_limit')} IP" if row.get("ip_limit") else ""
-    traffic = "безлимит" if row.get("is_unlimited_traffic") else ""
+    traffic = tr(language, "безлимит", "unlimited") if row.get("is_unlimited_traffic") else ""
     price = f"{row.get('api_price_rub')} ₽" if row.get("api_price_rub") else ""
     parts = [part for part in (family, period, ip, traffic, price) if part]
     return " • ".join(parts) + f" ({code})"
@@ -111,7 +121,7 @@ SETTING_GROUPS = [
     ({"ru": "🌐 Интерфейс", "en": "🌐 Interface"}, ["panel_language"]),
     ({"ru": "🔌 XyraNet", "en": "🔌 XyraNet"}, ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
     ({"ru": "🛒 Маркетплейсы", "en": "🛒 Marketplaces"}, ["digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
-    ({"ru": "🤖 Telegram", "en": "🤖 Telegram"}, ["enable_telegram", "telegram_bot_token"]),
+    ({"ru": "🤖 Telegram", "en": "🤖 Telegram"}, ["enable_telegram", "telegram_bot_token", "free_reissue_enabled"]),
     ({"ru": "🔔 Уведомления", "en": "🔔 Notifications"}, ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
     ({"ru": "🛡 Веб-панель", "en": "🛡 Web panel"}, ["app_base_url", "admin_username", "admin_password"]),
 ]
@@ -128,6 +138,7 @@ SETTING_ICONS = {
     "ggsel_api_key": "🔑",
     "enable_telegram": "🤖",
     "telegram_bot_token": "🔐",
+    "free_reissue_enabled": "♻️",
     "notify_new_purchases": "🛒",
     "notify_chat_messages": "💬",
     "notify_errors": "🚨",
@@ -207,12 +218,77 @@ def parse_mapping_payload(text: str) -> dict[str, str]:
     }
 
 
-def template_help_text() -> str:
-    lines = ["Доступные переменные:"]
+def template_help_text(language: str = "ru") -> str:
+    lines = [tr(language, "Доступные переменные:", "Available variables:")]
     for key, label in DELIVERY_TEMPLATE_VARIABLES.items():
         lines.append(f"<code>{{{key}}}</code> — {escape(label)}")
-    lines.append("\nСообщение <code>-</code>, <code>default</code> или <code>стандарт</code> сбросит шаблон.")
+    lines.append(
+        "\n"
+        + tr(
+            language,
+            "Сообщение <code>-</code>, <code>default</code> или <code>стандарт</code> сбросит шаблон.",
+            "Send <code>-</code>, <code>default</code> or <code>standard</code> to reset the template.",
+        )
+    )
     return "\n".join(lines)
+
+
+TEMPLATE_LABELS_EN = {
+    "create": "Purchase",
+    "renew": "Renewal",
+    "reissue": "Reissue",
+    "traffic": "LTE traffic",
+    "ip_limit": "IP limit",
+    "command_help": "Chat commands",
+    "ask_renew": "Ask for order_id: renewal",
+    "ask_reissue": "Ask for order_id: reissue",
+    "ask_traffic": "Ask for order_id: LTE traffic",
+    "ask_ip_limit": "Ask for order_id: IP limit",
+    "command_mismatch": "Command error",
+    "operation_error": "Operation error",
+    "free_reissue_help": "Free reissue hint",
+    "free_reissue_disabled": "Free reissue disabled",
+    "renew_command_mismatch": "Wrong command: renewal",
+    "renew_error": "Renewal error",
+    "reissue_command_mismatch": "Wrong command: reissue",
+    "reissue_error": "Reissue error",
+    "traffic_command_mismatch": "Wrong command: LTE traffic",
+    "traffic_error": "LTE traffic error",
+    "ip_limit_command_mismatch": "Wrong command: IP limit",
+    "ip_limit_error": "IP limit error",
+}
+
+TEMPLATE_STAGE_LABELS_EN = {
+    "create": "Order delivered",
+    "free_reissue_help": "Command without order ID",
+    "free_reissue_disabled": "Free reissue disabled",
+    "ask_renew": "Order received, waiting for order_id",
+    "renew": "order_id received, renewal completed",
+    "renew_command_mismatch": "Command does not match the lot",
+    "renew_error": "Operation error",
+    "ask_reissue": "Paid order received, waiting for order_id",
+    "reissue": "order_id received, reissue completed",
+    "reissue_command_mismatch": "Command does not match the lot",
+    "reissue_error": "Operation error",
+    "ask_traffic": "Order received, waiting for order_id",
+    "traffic": "order_id received, LTE traffic added",
+    "traffic_command_mismatch": "Command does not match the lot",
+    "traffic_error": "Operation error",
+    "ask_ip_limit": "Order received, waiting for order_id",
+    "ip_limit": "order_id received, IP limit increased",
+    "ip_limit_command_mismatch": "Command does not match the lot",
+    "ip_limit_error": "Operation error",
+}
+
+
+def template_label(key: str, fallback: str, language: str) -> str:
+    if language == "en":
+        return TEMPLATE_LABELS_EN.get(key) or TEMPLATE_STAGE_LABELS_EN.get(key) or fallback
+    return fallback
+
+
+def template_state_label(is_custom: bool, language: str) -> str:
+    return tr(language, "свой", "custom") if is_custom else tr(language, "стандарт", "default")
 
 
 def money_text(value: dict[str, Any] | None, currency: str = "₽") -> str:
@@ -227,56 +303,76 @@ def revenue_text(row: dict[str, Any]) -> str:
     return ", ".join(f"{item.get('text', '0')} {item.get('currency', 'RUB')}" for item in items)
 
 
-def action_label(action: str) -> str:
-    return {
+def action_label(action: str, language: str = "ru") -> str:
+    labels = {
         "create": "Покупка",
         "renew": "Продление",
         "reissue": "Перевыпуск",
         "traffic": "LTE-трафик",
         "ip_limit": "IP-лимит",
-    }.get(action, action)
+    }
+    labels_en = {
+        "create": "Purchase",
+        "renew": "Renewal",
+        "reissue": "Reissue",
+        "traffic": "LTE traffic",
+        "ip_limit": "IP limit",
+    }
+    return (labels_en if language == "en" else labels).get(action, action)
 
 
-def statistics_keyboard(active_period: str) -> InlineKeyboardMarkup:
+STATS_PERIOD_LABELS_EN = {
+    "today": "Today",
+    "yesterday": "Yesterday",
+    "7d": "7 days",
+    "30d": "30 days",
+    "90d": "90 days",
+    "all": "All time",
+}
+
+
+def statistics_keyboard(active_period: str, language: str = "ru") -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for key, label in STATS_PERIODS.items():
         prefix = "✅ " if key == active_period else ""
+        label = STATS_PERIOD_LABELS_EN.get(key, label) if language == "en" else label
         row.append(InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"stats:period:{key}"))
         if len(row) == 3:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
+    buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def statistics_text(data: dict[str, Any]) -> str:
+def statistics_text(data: dict[str, Any], language: str = "ru") -> str:
     totals = data["totals"]
+    period_label = STATS_PERIOD_LABELS_EN.get(str(data["period"]["key"]), str(data["period"]["label"])) if language == "en" else str(data["period"]["label"])
     lines = [
-        f"📈 <b>Статистика: {escape(str(data['period']['label']))}</b>",
-        f"🧾 Продаж: <b>{totals['sales_count']}</b> ({totals['delivered_count']} выдано, {totals['pending_count']} ждёт)",
-        f"💵 Сумма продаж: <b>{escape(revenue_text(totals))}</b>",
-        f"💸 Расход XyraNet: <b>{escape(money_text(totals['expense_rub']))}</b>",
-        f"📊 Прибыль: <b>{escape(money_text(totals['profit_rub']))}</b>",
+        f"📈 <b>{tr(language, 'Статистика', 'Statistics')}: {escape(period_label)}</b>",
+        f"🧾 {tr(language, 'Продаж', 'Sales')}: <b>{totals['sales_count']}</b> ({totals['delivered_count']} {tr(language, 'выдано', 'delivered')}, {totals['pending_count']} {tr(language, 'ждёт', 'pending')})",
+        f"💵 {tr(language, 'Сумма продаж', 'Revenue')}: <b>{escape(revenue_text(totals))}</b>",
+        f"💸 {tr(language, 'Расход XyraNet', 'XyraNet cost')}: <b>{escape(money_text(totals['expense_rub']))}</b>",
+        f"📊 {tr(language, 'Прибыль', 'Profit')}: <b>{escape(money_text(totals['profit_rub']))}</b>",
     ]
     if totals.get("margin_percent") is not None:
-        lines[-1] += f" · маржа {totals['margin_percent']}%"
-    lines.append(f"🧮 Средний чек: <b>{escape(money_text(totals['avg_order_rub']))}</b>")
+        lines[-1] += f" · {tr(language, 'маржа', 'margin')} {totals['margin_percent']}%"
+    lines.append(f"🧮 {tr(language, 'Средний чек', 'Average order')}: <b>{escape(money_text(totals['avg_order_rub']))}</b>")
 
     if data.get("marketplaces"):
-        lines.append("\n<b>Площадки</b>")
+        lines.append(f"\n<b>{tr(language, 'Площадки', 'Marketplaces')}</b>")
         for item in data["marketplaces"][:4]:
             lines.append(f"• {escape(str(item['label']))}: {item['sales_count']} · {escape(revenue_text(item))}")
 
     if data.get("actions"):
-        lines.append("\n<b>Действия</b>")
+        lines.append(f"\n<b>{tr(language, 'Действия', 'Actions')}</b>")
         for item in data["actions"][:5]:
-            lines.append(f"• {escape(action_label(str(item['key'])))}: {item['sales_count']} · {escape(revenue_text(item))}")
+            lines.append(f"• {escape(action_label(str(item['key']), language))}: {item['sales_count']} · {escape(revenue_text(item))}")
 
     if data.get("tariffs"):
-        lines.append("\n<b>Топ тарифов</b>")
+        lines.append(f"\n<b>{tr(language, 'Топ тарифов', 'Top tariffs')}</b>")
         for item in data["tariffs"][:5]:
             lines.append(f"• <code>{escape(str(item['label']))}</code>: {item['sales_count']} · {escape(revenue_text(item))}")
     return "\n".join(lines)
@@ -303,7 +399,7 @@ def mb_text(value: Any) -> str:
     return f"{number:.0f} MB"
 
 
-def system_metrics_text(data: dict[str, Any]) -> str:
+def system_metrics_text(data: dict[str, Any], language: str = "ru") -> str:
     load_average = data.get("cpu", {}).get("load_average")
     load_text = " / ".join(f"{float(item):.2f}" for item in load_average) if load_average else "n/a"
     memory = data.get("memory", {})
@@ -311,19 +407,19 @@ def system_metrics_text(data: dict[str, Any]) -> str:
     process = data.get("process", {})
     return "\n".join(
         [
-            "🖥 <b>Сервер</b>",
+            f"🖥 <b>{tr(language, 'Сервер', 'Server')}</b>",
             f"Host: <code>{escape(str(data.get('hostname') or 'n/a'))}</code>",
             f"OS: <code>{escape(str(data.get('platform') or 'n/a'))}</code>",
             f"Python: <code>{escape(str(data.get('python') or 'n/a'))}</code>",
             "",
-            f"CPU: <b>{percent_text(data.get('cpu', {}).get('percent'))}</b> · ядер {escape(str(data.get('cpu', {}).get('cores') or 'n/a'))}",
+            f"CPU: <b>{percent_text(data.get('cpu', {}).get('percent'))}</b> · {tr(language, 'ядер', 'cores')} {escape(str(data.get('cpu', {}).get('cores') or 'n/a'))}",
             f"Load avg: <code>{escape(load_text)}</code>",
             f"RAM: <b>{percent_text(memory.get('percent'))}</b> · {mb_text(memory.get('used_mb'))} / {mb_text(memory.get('total_mb'))}",
             f"Swap: {mb_text(memory.get('swap_used_mb'))} / {mb_text(memory.get('swap_total_mb'))}",
-            f"Диск: <b>{percent_text(disk.get('percent'))}</b> · свободно {mb_text(disk.get('free_mb'))}",
+            f"{tr(language, 'Диск', 'Disk')}: <b>{percent_text(disk.get('percent'))}</b> · {tr(language, 'свободно', 'free')} {mb_text(disk.get('free_mb'))}",
             "",
-            f"Процесс: PID <code>{escape(str(process.get('pid') or 'n/a'))}</code> · RAM {mb_text(process.get('rss_mb'))} · CPU {percent_text(process.get('cpu_percent'))}",
-            f"Аптайм: сервер <b>{escape(str(data.get('uptime') or 'n/a'))}</b> · приложение <b>{escape(str(process.get('uptime') or 'n/a'))}</b>",
+            f"{tr(language, 'Процесс', 'Process')}: PID <code>{escape(str(process.get('pid') or 'n/a'))}</code> · RAM {mb_text(process.get('rss_mb'))} · CPU {percent_text(process.get('cpu_percent'))}",
+            f"{tr(language, 'Аптайм', 'Uptime')}: {tr(language, 'сервер', 'server')} <b>{escape(str(data.get('uptime') or 'n/a'))}</b> · {tr(language, 'приложение', 'app')} <b>{escape(str(process.get('uptime') or 'n/a'))}</b>",
         ]
     )
 
@@ -359,22 +455,28 @@ def build_dispatcher(
         return bool(telegram_id and runtime.is_env_admin(telegram_id))
 
     async def deny_message(message: Message) -> None:
-        await message.answer("🔒 Доступ только для администраторов.")
+        language = runtime_language(runtime)
+        await message.answer(tr(language, "🔒 Доступ только для администраторов.", "🔒 Administrators only."))
 
     async def deny_callback(callback: CallbackQuery) -> None:
-        await callback.answer("🔒 Нет доступа", show_alert=True)
+        language = runtime_language(runtime)
+        await callback.answer(tr(language, "🔒 Нет доступа", "🔒 Access denied"), show_alert=True)
 
     async def send_home(message: Message) -> None:
+        language = runtime_language(runtime)
         uid = user_id(message)
         if not is_admin(uid):
             await message.answer(
-                "🔑 Пришлите сюда 16-символьный код покупки Plati.Market/Digiseller. "
-                "Я проверю оплату и выдам VPN-доступ."
+                tr(
+                    language,
+                    "🔑 Пришлите сюда 16-символьный код покупки Plati.Market/Digiseller. Я проверю оплату и выдам VPN-доступ.",
+                    "🔑 Send the 16-character Plati.Market/Digiseller purchase code here. I will verify the payment and deliver VPN access.",
+                )
             )
             return
         await message.answer(
-            "✨ <b>XyraNet Reseller Autoseller</b>\nВыберите действие:",
-            reply_markup=main_menu(is_owner(uid)),
+            f"✨ <b>XyraNet Reseller Autoseller</b>\n{tr(language, 'Выберите действие:', 'Choose an action:')}",
+            reply_markup=main_menu(is_owner(uid), language),
         )
 
     @router.message(Command("start", "menu"))
@@ -384,18 +486,20 @@ def build_dispatcher(
     @router.callback_query(F.data == "menu:home")
     async def home(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         await answer_or_edit(
             callback,
-            "✨ <b>XyraNet Reseller Autoseller</b>\nВыберите действие:",
-            main_menu(is_owner(uid)),
+            f"✨ <b>XyraNet Reseller Autoseller</b>\n{tr(language, 'Выберите действие:', 'Choose an action:')}",
+            main_menu(is_owner(uid), language),
         )
 
     @router.callback_query(F.data == "menu:status")
     async def status(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
@@ -403,24 +507,26 @@ def build_dispatcher(
         sales = db.list_sales(limit=5)
         await answer_or_edit(
             callback,
-            "📊 <b>Статус</b>\n"
-            f"🧾 Маппингов: <b>{len(products)}</b>\n"
-            f"📦 Последних продаж в базе: <b>{len(sales)}</b>\n"
-            f"👥 Telegram-админов: <b>{len(runtime.bot_admin_ids())}</b>",
-            back_menu(),
+            f"📊 <b>{tr(language, 'Статус', 'Status')}</b>\n"
+            f"🧾 {tr(language, 'Маппингов', 'Mappings')}: <b>{len(products)}</b>\n"
+            f"📦 {tr(language, 'Последних продаж в базе', 'Recent sales in database')}: <b>{len(sales)}</b>\n"
+            f"👥 {tr(language, 'Telegram-админов', 'Telegram admins')}: <b>{len(runtime.bot_admin_ids())}</b>",
+            back_menu(language),
         )
 
     @router.callback_query(F.data == "menu:system")
     async def system_status(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
-        await answer_or_edit(callback, system_metrics_text(collect_system_metrics()), back_menu())
+        await answer_or_edit(callback, system_metrics_text(collect_system_metrics(), language), back_menu(language))
 
     @router.callback_query(F.data == "menu:balance")
     async def balance(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
@@ -428,51 +534,53 @@ def build_dispatcher(
             data = await xyranet.summary()
             text = (
                 "💰 <b>Wholesale</b>\n"
-                f"Баланс: <b>{escape(str(data.get('balance')))} {escape(str(data.get('currency', 'RUB')))}</b>\n"
-                f"Оборот API: <b>{escape(str(data.get('api_spent_total')))}</b>\n"
-                f"Покупок: <b>{escape(str(data.get('api_purchase_count')))}</b>"
+                f"{tr(language, 'Баланс', 'Balance')}: <b>{escape(str(data.get('balance')))} {escape(str(data.get('currency', 'RUB')))}</b>\n"
+                f"{tr(language, 'Оборот API', 'API turnover')}: <b>{escape(str(data.get('api_spent_total')))}</b>\n"
+                f"{tr(language, 'Покупок', 'Purchases')}: <b>{escape(str(data.get('api_purchase_count')))}</b>"
             )
         except Exception as exc:
-            text = f"⚠️ Не смог получить баланс: <code>{escape(str(exc))}</code>"
-        await answer_or_edit(callback, text, back_menu())
+            text = f"⚠️ {tr(language, 'Не смог получить баланс', 'Could not fetch balance')}: <code>{escape(str(exc))}</code>"
+        await answer_or_edit(callback, text, back_menu(language))
 
     @router.callback_query(F.data == "menu:tariffs")
     async def tariffs(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         try:
             rows = await xyranet.tariffs()
-            lines = ["🧭 <b>Доступные тарифы</b>"]
+            lines = [f"🧭 <b>{tr(language, 'Доступные тарифы', 'Available tariffs')}</b>"]
             for item in rows[:30]:
-                lines.append(f"• {escape(format_tariff_label(item))}")
+                lines.append(f"• {escape(format_tariff_label(item, language))}")
             text = "\n".join(lines)
         except Exception as exc:
-            text = f"⚠️ Не смог получить тарифы: <code>{escape(str(exc))}</code>"
-        await answer_or_edit(callback, text, back_menu())
+            text = f"⚠️ {tr(language, 'Не смог получить тарифы', 'Could not fetch tariffs')}: <code>{escape(str(exc))}</code>"
+        await answer_or_edit(callback, text, back_menu(language))
 
     @router.callback_query(F.data == "menu:products")
     async def products(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         rows = db.list_products()
         if not rows:
-            await answer_or_edit(callback, "🧾 Маппингов пока нет.", back_menu())
+            await answer_or_edit(callback, tr(language, "🧾 Маппингов пока нет.", "🧾 No mappings yet."), back_menu(language))
             return
-        lines = ["🧾 <b>Товары</b>"]
+        lines = [f"🧾 <b>{tr(language, 'Товары', 'Products')}</b>"]
         buttons = []
         for item in rows[:20]:
-            state = "✅ вкл" if int(item["enabled"]) else "⏸ выкл"
+            state = tr(language, "✅ вкл", "✅ on") if int(item["enabled"]) else tr(language, "⏸ выкл", "⏸ off")
             lines.append(
                 f"#{item['id']} {escape(format_product_key(item))} → "
                 f"<code>{escape(item['tariff_code'])}</code> ({state})"
             )
             next_state = "0" if int(item["enabled"]) else "1"
             buttons.append([InlineKeyboardButton(text=f"#{item['id']} {state}", callback_data=f"product:toggle:{item['id']}:{next_state}")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
         await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
 
     @router.callback_query(F.data.startswith("product:toggle:"))
@@ -483,81 +591,89 @@ def build_dispatcher(
             return
         _, _, product_id, enabled = (callback.data or "").split(":")
         db.set_product_enabled(int(product_id), enabled == "1")
-        await callback.answer("✅ Готово")
+        await callback.answer(tr(runtime_language(runtime), "✅ Готово", "✅ Done"))
         await products(callback)
 
     @router.callback_query(F.data == "menu:templates")
     async def templates(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
-        buttons = [[InlineKeyboardButton(text=group["label"], callback_data=f"template:group:{group['key']}")] for group in TEMPLATE_GROUPS]
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
-        await answer_or_edit(callback, "📝 <b>Шаблоны</b>\nВыберите вид действия.", InlineKeyboardMarkup(inline_keyboard=buttons))
-        return
-        lines = ["📝 <b>Шаблоны по виду действия</b>"]
-        buttons = []
-        current_category = ""
-        for action, label in ACTION_LABELS.items():
-            category = TEMPLATE_CATEGORIES.get(action, "Прочее")
-            if category != current_category:
-                current_category = category
-                lines.append(f"\n<b>{escape(category)}</b>")
-            state = "свой" if (db.get_setting(delivery_template_key(action)) or "").strip() else "стандарт"
-            lines.append(f"• {escape(label)} — {state}")
-            buttons.append([InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"template:edit:{action}")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
-        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=template_label(str(group["key"]), str(group["label"]), language),
+                    callback_data=f"template:group:{group['key']}",
+                )
+            ]
+            for group in TEMPLATE_GROUPS
+        ]
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
+        await answer_or_edit(
+            callback,
+            f"📝 <b>{tr(language, 'Шаблоны', 'Templates')}</b>\n{tr(language, 'Выберите вид действия.', 'Choose an action type.')}",
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
 
     @router.callback_query(F.data.startswith("template:group:"))
     async def template_group(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         group_key = (callback.data or "").split(":")[-1]
         group = next((item for item in TEMPLATE_GROUPS if item["key"] == group_key), None)
         if not group:
-            await callback.answer("Вид действия не найден", show_alert=True)
+            await callback.answer(tr(language, "Вид действия не найден", "Action type not found"), show_alert=True)
             return
-        lines = [f"📝 <b>{escape(group['label'])}</b>"]
+        lines = [f"📝 <b>{escape(template_label(group_key, str(group['label']), language))}</b>"]
         buttons = []
         command_action = str(group.get("command_action") or "")
         if command_action:
             service = DeliveryService(db=db, xyranet=xyranet)
-            lines.append(f"Команда: <code>{escape(service.expected_command(command_action))}</code>")
+            lines.append(f"{tr(language, 'Команда', 'Command')}: <code>{escape(service.expected_command(command_action))}</code>")
         for stage in group["stages"]:
             key = str(stage["key"])
-            state = "свой" if (db.get_setting(delivery_template_key(key)) or "").strip() else "стандарт"
-            lines.append(f"• {escape(stage['label'])} — {state}")
-            buttons.append([InlineKeyboardButton(text=f"✏️ {stage['label']}", callback_data=f"template:edit:{key}")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:templates")])
+            is_custom = bool((db.get_setting(delivery_template_key(key)) or "").strip())
+            stage_label = template_label(key, str(stage["label"]), language)
+            lines.append(f"• {escape(stage_label)} — {template_state_label(is_custom, language)}")
+            buttons.append([InlineKeyboardButton(text=f"✏️ {stage_label}", callback_data=f"template:edit:{key}")])
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:templates")])
         await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
 
     @router.callback_query(F.data.startswith("template:edit:"))
     async def edit_template(callback: CallbackQuery, state: FSMContext) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         action = (callback.data or "").split(":")[-1]
         if action not in DEFAULT_ACTION_TEMPLATES:
-            await callback.answer("Вид действия не найден", show_alert=True)
+            await callback.answer(tr(language, "Вид действия не найден", "Action type not found"), show_alert=True)
             return
         await state.set_state(MappingState.waiting_template)
         await state.update_data(action=action)
         current = (db.get_setting(delivery_template_key(action)) or "").strip() or DEFAULT_ACTION_TEMPLATES[action]
+        label = template_label(action, ACTION_LABELS[action], language)
         await answer_or_edit(
             callback,
-            f"✏️ <b>Шаблон: {escape(ACTION_LABELS[action])}</b>\n\n"
-            f"{template_help_text()}\n\n"
-            "Текущий шаблон:\n"
+            f"✏️ <b>{tr(language, 'Шаблон', 'Template')}: {escape(label)}</b>\n\n"
+            f"{template_help_text(language)}\n\n"
+            f"{tr(language, 'Текущий шаблон', 'Current template')}:\n"
             f"<pre>{escape(current)}</pre>",
             InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="♻️ Сбросить на стандартный", callback_data=f"template:reset:{action}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:templates")],
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "♻️ Сбросить на стандартный", "♻️ Reset to default"),
+                            callback_data=f"template:reset:{action}",
+                        )
+                    ],
+                    [InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:templates")],
                 ]
             ),
         )
@@ -565,35 +681,37 @@ def build_dispatcher(
     @router.callback_query(F.data.startswith("template:reset:"))
     async def reset_template(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         action = (callback.data or "").split(":")[-1]
         if action not in DEFAULT_ACTION_TEMPLATES:
-            await callback.answer("Вид действия не найден", show_alert=True)
+            await callback.answer(tr(language, "Вид действия не найден", "Action type not found"), show_alert=True)
             return
         db.set_setting(delivery_template_key(action), "")
-        await callback.answer("✅ Шаблон сброшен")
+        await callback.answer(tr(language, "✅ Шаблон сброшен", "✅ Template reset"))
         await templates(callback)
 
     @router.callback_query(F.data == "menu:sales")
     async def sales(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         rows = db.list_sales(limit=10)
         if not rows:
-            await answer_or_edit(callback, "📦 Продаж пока нет.", back_menu())
+            await answer_or_edit(callback, tr(language, "📦 Продаж пока нет.", "📦 No sales yet."), back_menu(language))
             return
-        lines = ["📦 <b>Последние продажи</b>"]
+        lines = [f"📦 <b>{tr(language, 'Последние продажи', 'Latest sales')}</b>"]
         for item in rows:
             mark = "✅" if item.get("xyranet_order_id") else "⏳"
             key = f"{item['marketplace']}:{item['external_product_id']}"
             if item.get("external_variant_id"):
                 key += f":{item['external_variant_id']}"
             lines.append(f"{mark} {escape(item['external_order_id'])} — {escape(key)}")
-        await answer_or_edit(callback, "\n".join(lines), back_menu())
+        await answer_or_edit(callback, "\n".join(lines), back_menu(language))
 
     @router.callback_query(F.data.startswith("stats:period:"))
     async def statistics(callback: CallbackQuery) -> None:
@@ -602,24 +720,27 @@ def build_dispatcher(
             await deny_callback(callback)
             return
         period = (callback.data or "").split(":")[-1]
+        language = runtime_language(runtime)
         data = build_sales_statistics(db.list_sales_for_statistics(), period=period)
-        await answer_or_edit(callback, statistics_text(data), statistics_keyboard(str(data["period"]["key"])))
+        await answer_or_edit(callback, statistics_text(data, language), statistics_keyboard(str(data["period"]["key"]), language))
 
     @router.callback_query(F.data == "map:add")
     async def map_add(callback: CallbackQuery, state: FSMContext) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         await state.set_state(MappingState.waiting_payload)
         await answer_or_edit(
             callback,
-            "➕ <b>Новый маппинг</b>\n"
-            "Отправьте строку:\n"
-            "<code>plati | 123456 | lite_monthly | Lite 1 month</code>\n\n"
-            "Для варианта/кнопки GGsel:\n"
-            "<code>ggsel | offer-9 | button-lite | lite_monthly | Lite 1 month</code>",
-            back_menu(),
+            tr(language, "➕ <b>Новый маппинг</b>", "➕ <b>New mapping</b>")
+            + "\n"
+            + tr(language, "Отправьте строку:", "Send a line:")
+            + "\n<code>plati | 123456 | lite_monthly | Lite 1 month</code>\n\n"
+            + tr(language, "Для варианта/кнопки GGsel:", "For a GGsel variant/button:")
+            + "\n<code>ggsel | offer-9 | button-lite | lite_monthly | Lite 1 month</code>",
+            back_menu(language),
         )
 
     @router.message(Command("map"))
@@ -649,70 +770,90 @@ def build_dispatcher(
             return
         data = await state.get_data()
         action = str(data.get("action") or "")
+        language = runtime_language(runtime)
         if action not in ACTION_LABELS:
             await state.clear()
-            await message.answer("⚠️ Вид действия не найден.", reply_markup=main_menu(is_owner(uid)))
+            await message.answer(
+                tr(language, "⚠️ Вид действия не найден.", "⚠️ Action type not found."),
+                reply_markup=main_menu(is_owner(uid), language),
+            )
             return
         text = message.text or ""
         template = "" if text.strip().lower() in {"-", "default", "стандарт"} else text.strip()
         db.set_setting(delivery_template_key(action), template)
         await state.clear()
+        label = template_label(action, ACTION_LABELS[action], language)
         await message.answer(
-            "✅ Шаблон сохранён\n"
-            f"{escape(ACTION_LABELS[action])}\n"
-            f"{'Используется свой шаблон.' if template else 'Используется стандартный шаблон.'}",
-            reply_markup=main_menu(is_owner(uid)),
+            tr(language, "✅ Шаблон сохранён", "✅ Template saved")
+            + f"\n{escape(label)}\n"
+            + (
+                tr(language, "Используется свой шаблон.", "Custom template is used.")
+                if template
+                else tr(language, "Используется стандартный шаблон.", "Default template is used.")
+            ),
+            reply_markup=main_menu(is_owner(uid), language),
         )
 
     async def save_mapping_from_text(message: Message, text: str) -> None:
+        language = runtime_language(runtime)
         try:
             product = db.upsert_product(parse_mapping_payload(text))
         except ValueError as exc:
-            await message.answer(f"⚠️ Не разобрал маппинг: {escape(str(exc))}")
+            detail = escape(str(exc)) if language == "ru" else tr(language, "", "Invalid mapping format")
+            await message.answer(f"⚠️ {tr(language, 'Не разобрал маппинг', 'Could not parse mapping')}: {detail}")
             return
         await message.answer(
-            "✅ Маппинг сохранён\n"
+            tr(language, "✅ Маппинг сохранён", "✅ Mapping saved")
+            + "\n"
             f"{escape(format_product_key(product))}\n"
-            f"🧭 Тариф: <code>{escape(product['tariff_code'])}</code>",
-            reply_markup=main_menu(is_owner(user_id(message))),
+            f"🧭 {tr(language, 'Тариф', 'Tariff')}: <code>{escape(product['tariff_code'])}</code>",
+            reply_markup=main_menu(is_owner(user_id(message)), language),
         )
 
     @router.callback_query(F.data == "menu:users")
     async def users(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
         rows = runtime.list_bot_users()
-        lines = ["👥 <b>Доступ к боту</b>"]
+        lines = [f"👥 <b>{tr(language, 'Доступ к боту', 'Bot access')}</b>"]
         buttons = []
         owner = is_owner(uid)
         for row in rows:
             locked = " 🔒 env" if row["locked"] else ""
-            state = "✅ вкл" if row["enabled"] else "⏸ выкл"
+            state = tr(language, "✅ вкл", "✅ on") if row["enabled"] else tr(language, "⏸ выкл", "⏸ off")
             label = f" — {escape(row['label'])}" if row.get("label") else ""
             lines.append(f"{row['telegram_id']}{label} ({state}{locked})")
             if owner and not row["locked"]:
                 buttons.append(
-                    [InlineKeyboardButton(text=f"🗑 Убрать {row['telegram_id']}", callback_data=f"user:delete:{row['telegram_id']}")]
+                    [InlineKeyboardButton(text=f"{tr(language, '🗑 Убрать', '🗑 Remove')} {row['telegram_id']}", callback_data=f"user:delete:{row['telegram_id']}")]
                 )
         if owner:
-            buttons.append([InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="user:add")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
+            buttons.append([InlineKeyboardButton(text=tr(language, "➕ Добавить пользователя", "➕ Add user"), callback_data="user:add")])
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
         await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
 
     @router.callback_query(F.data == "user:add")
     async def user_add(callback: CallbackQuery, state: FSMContext) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
         await state.set_state(UserState.waiting_payload)
-        await answer_or_edit(callback, "➕ Отправьте Telegram ID и подпись, например:\n<code>123456789 Иван</code>", back_menu())
+        await answer_or_edit(
+            callback,
+            tr(language, "➕ Отправьте Telegram ID и подпись, например:", "➕ Send Telegram ID and a label, for example:")
+            + "\n<code>123456789 Admin</code>",
+            back_menu(language),
+        )
 
     @router.message(UserState.waiting_payload)
     async def user_payload(message: Message, state: FSMContext) -> None:
         uid = user_id(message)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await state.clear()
             await deny_message(message)
@@ -720,39 +861,41 @@ def build_dispatcher(
         try:
             telegram_id, label = parse_user_payload(message.text or "")
         except ValueError as exc:
-            await message.answer(f"⚠️ Не разобрал пользователя: {escape(str(exc))}")
+            detail = escape(str(exc)) if language == "ru" else tr(language, "", "Telegram ID must be first")
+            await message.answer(f"⚠️ {tr(language, 'Не разобрал пользователя', 'Could not parse user')}: {detail}")
             return
         if runtime.is_env_admin(telegram_id):
-            await message.answer("🔒 Этот пользователь уже указан в env и не удаляется.")
+            await message.answer(tr(language, "🔒 Этот пользователь уже указан в env и не удаляется.", "🔒 This user is defined in env and cannot be removed."))
         else:
             db.upsert_bot_user(telegram_id, label, added_by=uid)
-            await message.answer("✅ Пользователь добавлен.", reply_markup=main_menu(True))
+            await message.answer(tr(language, "✅ Пользователь добавлен.", "✅ User added."), reply_markup=main_menu(True, language))
         await state.clear()
 
     @router.callback_query(F.data.startswith("user:delete:"))
     async def user_delete(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
         telegram_id = int((callback.data or "").split(":")[-1])
         if runtime.is_env_admin(telegram_id):
-            await callback.answer("🔒 ENV-админа нельзя удалить", show_alert=True)
+            await callback.answer(tr(language, "🔒 ENV-админа нельзя удалить", "🔒 ENV admin cannot be removed"), show_alert=True)
             return
         db.delete_bot_user(telegram_id)
-        await callback.answer("🗑 Удалён")
+        await callback.answer(tr(language, "🗑 Удалён", "🗑 Removed"))
         await users(callback)
 
     @router.callback_query(F.data == "menu:settings")
     async def settings_menu(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
-        lines = ["⚙️ <b>Настройки</b>"]
+        lines = [f"⚙️ <b>{tr(language, 'Настройки', 'Settings')}</b>"]
         buttons = []
         settings_by_key = {item["key"]: item for item in runtime.setting_payload()}
-        language = runtime.language()
         for group_labels, keys in SETTING_GROUPS:
             lines.append(f"\n<b>{escape(setting_group_title(group_labels, language))}</b>")
             group_buttons: list[InlineKeyboardButton] = []
@@ -769,39 +912,29 @@ def build_dispatcher(
             if group_buttons:
                 buttons.append(group_buttons)
         if restart_bot:
-            buttons.append([InlineKeyboardButton(text="🔄 Перезапустить Telegram-бота", callback_data="bot:restart")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
-        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
-        return
-        for item in runtime.setting_payload():
-            value = "задано" if item["sensitive"] and item["configured"] else item["value"]
-            if item["kind"] == "boolean":
-                value = "✅ вкл" if runtime.get_bool(item["key"]) else "⏸ выкл"
-            restart = " 🔄" if item["restart_required"] else ""
-            lines.append(f"{escape(item['label'])}: <code>{escape(str(value))}</code>{restart}")
-            buttons.append([InlineKeyboardButton(text=item["label"], callback_data=f"setting:edit:{item['key']}")])
-        if restart_bot:
-            buttons.append([InlineKeyboardButton(text="🔄 Перезапустить Telegram-бота", callback_data="bot:restart")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
+            buttons.append([InlineKeyboardButton(text=tr(language, "🔄 Перезапустить Telegram-бота", "🔄 Restart Telegram bot"), callback_data="bot:restart")])
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
         await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
 
     @router.callback_query(F.data == "bot:restart")
     async def bot_restart(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
         if not restart_bot:
-            await callback.answer("⚠️ Рестарт недоступен", show_alert=True)
+            await callback.answer(tr(language, "⚠️ Рестарт недоступен", "⚠️ Restart is unavailable"), show_alert=True)
             return
-        await callback.answer("🔄 Перезапускаю Telegram-бота")
+        await callback.answer(tr(language, "🔄 Перезапускаю Telegram-бота", "🔄 Restarting Telegram bot"))
         if callback.message:
-            await callback.message.edit_text("🔄 Telegram-бот перезапускается.")
+            await callback.message.edit_text(tr(language, "🔄 Telegram-бот перезапускается.", "🔄 Telegram bot is restarting."))
         asyncio.create_task(restart_bot())
 
     @router.callback_query(F.data.startswith("setting:edit:"))
     async def setting_edit(callback: CallbackQuery, state: FSMContext) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
@@ -810,7 +943,7 @@ def build_dispatcher(
         item = next((row for row in runtime.setting_payload() if row["key"] == key), None)
         if definition.kind == "boolean":
             runtime.set_value(key, not runtime.get_bool(key))
-            await callback.answer("✅ Переключено")
+            await callback.answer(tr(language, "✅ Переключено", "✅ Switched"))
             await settings_menu(callback)
             return
         if definition.kind == "select":
@@ -818,18 +951,27 @@ def build_dispatcher(
                 [InlineKeyboardButton(text=str(option["label"]), callback_data=f"setting:select:{key}:{option['value']}")]
                 for option in (item or {}).get("options", [])
             ]
-            options.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")])
+            options.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:settings")])
             label = str((item or {}).get("label") or definition.label)
-            await answer_or_edit(callback, f"🌐 <b>{escape(label)}</b>\nВыберите значение:", InlineKeyboardMarkup(inline_keyboard=options))
+            await answer_or_edit(
+                callback,
+                f"🌐 <b>{escape(label)}</b>\n{tr(language, 'Выберите значение:', 'Choose a value:')}",
+                InlineKeyboardMarkup(inline_keyboard=options),
+            )
             return
         await state.set_state(SettingState.waiting_value)
         await state.update_data(setting_key=key)
         label = str((item or {}).get("label") or definition.label)
-        await answer_or_edit(callback, f"✏️ Отправьте новое значение для <b>{escape(label)}</b>.", back_menu())
+        await answer_or_edit(
+            callback,
+            f"✏️ {tr(language, 'Отправьте новое значение для', 'Send a new value for')} <b>{escape(label)}</b>.",
+            back_menu(language),
+        )
 
     @router.callback_query(F.data.startswith("setting:select:"))
     async def setting_select(callback: CallbackQuery) -> None:
         uid = user_id(callback)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await deny_callback(callback)
             return
@@ -837,14 +979,16 @@ def build_dispatcher(
         try:
             runtime.set_value(key, value)
         except ValueError as exc:
-            await callback.answer(f"⚠️ {str(exc)}", show_alert=True)
+            detail = str(exc) if language == "ru" else "Unsupported setting value"
+            await callback.answer(f"⚠️ {detail}", show_alert=True)
             return
-        await callback.answer("✅ Сохранено")
+        await callback.answer(tr(language, "✅ Сохранено", "✅ Saved"))
         await settings_menu(callback)
 
     @router.message(SettingState.waiting_value)
     async def setting_value(message: Message, state: FSMContext) -> None:
         uid = user_id(message)
+        language = runtime_language(runtime)
         if not is_owner(uid):
             await state.clear()
             await deny_message(message)
@@ -854,28 +998,54 @@ def build_dispatcher(
         try:
             runtime.set_value(key, message.text or "")
         except ValueError as exc:
-            await message.answer(f"⚠️ Не сохранил настройку: {escape(str(exc))}")
+            detail = escape(str(exc)) if language == "ru" else tr(language, "", "Could not save this value")
+            await message.answer(f"⚠️ {tr(language, 'Не сохранил настройку', 'Could not save setting')}: {detail}")
             return
         definition = SETTING_BY_KEY[key]
-        note = "\n🔄 Нажмите «Перезапустить Telegram-бота», чтобы применить настройку." if definition.restart_required else ""
-        await message.answer(f"✅ Настройка сохранена.{note}", reply_markup=main_menu(True))
+        note = (
+            "\n"
+            + tr(
+                language,
+                "🔄 Нажмите «Перезапустить Telegram-бота», чтобы применить настройку.",
+                "🔄 Press “Restart Telegram bot” to apply this setting.",
+            )
+            if definition.restart_required
+            else ""
+        )
+        await message.answer(
+            f"{tr(language, '✅ Настройка сохранена.', '✅ Setting saved.')}{note}",
+            reply_markup=main_menu(True, language),
+        )
         await state.clear()
 
     @router.message(F.text)
     async def buyer_unique_code(message: Message) -> None:
+        language = runtime_language(runtime)
         text = (message.text or "").strip().replace(" ", "").replace("-", "")
         if text.startswith("/"):
             return
         if not UNIQUE_CODE_RE.fullmatch(text):
             if not is_admin(user_id(message)):
-                await message.answer("🔑 Пришлите 16-символьный код покупки без пробелов.")
+                await message.answer(
+                    tr(
+                        language,
+                        "🔑 Пришлите 16-символьный код покупки без пробелов.",
+                        "🔑 Send the 16-character purchase code without spaces.",
+                    )
+                )
             return
-        await message.answer("🔎 Проверяю код покупки...")
+        await message.answer(tr(language, "🔎 Проверяю код покупки...", "🔎 Checking purchase code..."))
         try:
             purchase = await digiseller.purchase_by_unique_code(text)
             event = sale_event_from_unique_code(purchase, text)
             if not event.external_order_id or not event.external_product_id:
-                await message.answer("⚠️ Код найден, но Digiseller не вернул номер заказа или ID товара.")
+                await message.answer(
+                    tr(
+                        language,
+                        "⚠️ Код найден, но Digiseller не вернул номер заказа или ID товара.",
+                        "⚠️ Code found, but Digiseller did not return the order number or product ID.",
+                    )
+                )
                 return
             existing = db.get_sale_with_delivery(event.marketplace, event.external_order_id)
             if not existing and purchase.get("inv") not in (None, ""):
@@ -891,11 +1061,15 @@ def build_dispatcher(
                 pass
             await message.answer(result["delivery_text"])
         except DigisellerApiError as exc:
-            await message.answer(f"⚠️ Не получилось проверить код: <code>{escape(str(exc))}</code>")
+            await message.answer(
+                f"⚠️ {tr(language, 'Не получилось проверить код', 'Could not verify code')}: <code>{escape(str(exc))}</code>"
+            )
         except ValueError as exc:
-            await message.answer(f"⚠️ Не получилось выдать доступ: <code>{escape(str(exc))}</code>")
+            await message.answer(
+                f"⚠️ {tr(language, 'Не получилось выдать доступ', 'Could not deliver access')}: <code>{escape(str(exc))}</code>"
+            )
         except Exception as exc:
-            await message.answer(f"⚠️ Ошибка выдачи: <code>{escape(str(exc))}</code>")
+            await message.answer(f"⚠️ {tr(language, 'Ошибка выдачи', 'Delivery error')}: <code>{escape(str(exc))}</code>")
 
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)

@@ -183,14 +183,26 @@ def create_app() -> FastAPI:
         except RuntimeError:
             log.exception("Cannot schedule Telegram admin notification")
 
+    def tr(ru: str, en: str) -> str:
+        return en if runtime.language() == "en" else ru
+
     def action_label(action: str) -> str:
-        return {
+        labels_ru = {
             "create": "покупка",
             "renew": "продление",
             "reissue": "перевыпуск",
             "traffic": "LTE-трафик",
             "ip_limit": "IP-лимит",
-        }.get(action, action or "покупка")
+        }
+        labels_en = {
+            "create": "purchase",
+            "renew": "renewal",
+            "reissue": "reissue",
+            "traffic": "LTE traffic",
+            "ip_limit": "IP limit",
+        }
+        labels = labels_en if runtime.language() == "en" else labels_ru
+        return labels.get(action, action or tr("покупка", "purchase"))
 
     def sale_notification_text(result: dict[str, Any], *, source: str) -> str:
         sale = result.get("sale") or {}
@@ -207,32 +219,32 @@ def create_app() -> FastAPI:
         if product:
             action = str(product.get("action") or action)
         lines = [
-            "🛒 <b>Новая покупка</b>",
-            f"Источник: <b>{escape(source)}</b>",
-            f"Заказ: <code>{sale_title(sale)}</code>",
-            f"Товар: <code>{escape(str(sale.get('external_product_id') or ''))}</code>",
-            f"Действие: <b>{escape(action_label(action))}</b>",
+            f"🛒 <b>{tr('Новая покупка', 'New purchase')}</b>",
+            f"{tr('Источник', 'Source')}: <b>{escape(source)}</b>",
+            f"{tr('Заказ', 'Order')}: <code>{sale_title(sale)}</code>",
+            f"{tr('Товар', 'Product')}: <code>{escape(str(sale.get('external_product_id') or ''))}</code>",
+            f"{tr('Действие', 'Action')}: <b>{escape(action_label(action))}</b>",
         ]
         if sale.get("amount"):
-            lines.append(f"Сумма: <b>{escape(str(sale.get('amount')))} {escape(str(sale.get('currency') or ''))}</b>")
+            lines.append(f"{tr('Сумма', 'Amount')}: <b>{escape(str(sale.get('amount')))} {escape(str(sale.get('currency') or ''))}</b>")
         if status == "waiting_order_id":
-            lines.append("Статус: ⏳ ждём ID заказа")
+            lines.append(f"{tr('Статус', 'Status')}: ⏳ {tr('ждём ID заказа', 'waiting for order ID')}")
         elif status == "delivered":
             delivery = result.get("delivery") or {}
-            lines.append(f"Статус: ✅ выдано")
+            lines.append(f"{tr('Статус', 'Status')}: ✅ {tr('выдано', 'delivered')}")
             if delivery.get("xyranet_order_id"):
-                lines.append(f"ID заказа: <code>{escape(str(delivery['xyranet_order_id']))}</code>")
+                lines.append(f"{tr('ID заказа', 'Order ID')}: <code>{escape(str(delivery['xyranet_order_id']))}</code>")
         elif status == "duplicate":
-            lines.append("Статус: ♻️ повтор, отправлена сохранённая выдача")
+            lines.append(f"{tr('Статус', 'Status')}: ♻️ {tr('повтор, отправлена сохранённая выдача', 'duplicate, saved delivery was resent')}")
         else:
-            lines.append(f"Статус: <b>{escape(status)}</b>")
+            lines.append(f"{tr('Статус', 'Status')}: <b>{escape(status)}</b>")
         return "\n".join(lines)
 
     def chat_message_notification(marketplace: str, external_order_id: str, text: str) -> str:
         return (
-            "💬 <b>Новое сообщение в чате</b>\n"
-            f"Площадка: <b>{escape(marketplace)}</b>\n"
-            f"Заказ/чат: <code>{escape(external_order_id)}</code>\n"
+            f"💬 <b>{tr('Новое сообщение в чате', 'New chat message')}</b>\n"
+            f"{tr('Площадка', 'Marketplace')}: <b>{escape(marketplace)}</b>\n"
+            f"{tr('Заказ/чат', 'Order/chat')}: <code>{escape(external_order_id)}</code>\n"
             f"<pre>{escape(compact_text(text, 700))}</pre>"
         )
 
@@ -240,13 +252,14 @@ def create_app() -> FastAPI:
         data = build_sales_statistics(db.list_sales_for_statistics(), period="yesterday")
         totals = data["totals"]
         revenue = ", ".join(f"{item['text']} {item['currency']}" for item in totals.get("revenue", [])) or "0 ₽"
+        period_label = "Yesterday" if runtime.language() == "en" else str(data["period"]["label"])
         return (
-            "📈 <b>Ежедневная статистика</b>\n"
-            f"Период: <b>{escape(str(data['period']['label']))}</b>\n"
-            f"Продаж: <b>{totals['sales_count']}</b> ({totals['delivered_count']} выдано, {totals['pending_count']} ждёт)\n"
-            f"Сумма: <b>{escape(revenue)}</b>\n"
-            f"Расход: <b>{escape(str(totals['expense_rub']['text']))} ₽</b>\n"
-            f"Прибыль: <b>{escape(str(totals['profit_rub']['text']))} ₽</b>"
+            f"📈 <b>{tr('Ежедневная статистика', 'Daily statistics')}</b>\n"
+            f"{tr('Период', 'Period')}: <b>{escape(period_label)}</b>\n"
+            f"{tr('Продаж', 'Sales')}: <b>{totals['sales_count']}</b> ({totals['delivered_count']} {tr('выдано', 'delivered')}, {totals['pending_count']} {tr('ждёт', 'pending')})\n"
+            f"{tr('Сумма', 'Revenue')}: <b>{escape(revenue)}</b>\n"
+            f"{tr('Расход', 'Expense')}: <b>{escape(str(totals['expense_rub']['text']))} ₽</b>\n"
+            f"{tr('Прибыль', 'Profit')}: <b>{escape(str(totals['profit_rub']['text']))} ₽</b>"
         )
 
     async def daily_statistics_loop() -> None:
@@ -397,9 +410,9 @@ def create_app() -> FastAPI:
                     payload={"invoice_id": invoice_id},
                 )
                 notify_admins(
-                    "♻️ <b>Повторная отправка выдачи</b>\n"
-                    f"Заказ: <code>{escape(str(existing.get('marketplace')))}:{escape(str(existing.get('external_order_id')))}</code>\n"
-                    f"Чат: <code>{escape(invoice_id)}</code>"
+                    f"♻️ <b>{tr('Повторная отправка выдачи', 'Delivery resent')}</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(str(existing.get('marketplace')))}:{escape(str(existing.get('external_order_id')))}</code>\n"
+                    f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>"
                 , kind="pending")
                 return True
             result = await delivery_service.handle_sale(event, notify_marketplace=False)
@@ -452,10 +465,10 @@ def create_app() -> FastAPI:
                 f"⚠️ Не удалось проверить уникальный код Digiseller: {exc}",
             )
             notify_admins(
-                "⚠️ <b>Ошибка проверки уникального кода</b>\n"
-                f"Чат: <code>{escape(invoice_id)}</code>\n"
-                f"Код: <code>{escape(code)}</code>\n"
-                f"Ошибка: <code>{escape(str(exc))}</code>"
+                f"⚠️ <b>{tr('Ошибка проверки уникального кода', 'Unique code verification error')}</b>\n"
+                f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('Код', 'Code')}: <code>{escape(code)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>"
             , kind="errors")
             return True
         except Exception as exc:
@@ -474,10 +487,10 @@ def create_app() -> FastAPI:
                 f"⚠️ Не удалось выдать доступ по коду: {exc}",
             )
             notify_admins(
-                "🚨 <b>Ошибка выдачи по коду</b>\n"
-                f"Чат: <code>{escape(invoice_id)}</code>\n"
-                f"Код: <code>{escape(code)}</code>\n"
-                f"Ошибка: <code>{escape(str(exc))}</code>"
+                f"🚨 <b>{tr('Ошибка выдачи по коду', 'Code delivery error')}</b>\n"
+                f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('Код', 'Code')}: <code>{escape(code)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>"
             , kind="errors")
             return True
 
@@ -509,20 +522,20 @@ def create_app() -> FastAPI:
             )
             await messenger.send_message("plati", invoice_id, str(result["delivery_text"]))
             notify_admins(
-                "🔄 <b>Бесплатный перевыпуск</b>\n"
-                f"Чат: <code>{escape(invoice_id)}</code>\n"
-                f"ID заказа: <code>{escape(command['order_id'])}</code>\n"
-                "Статус: ✅ выполнено"
+                f"🔄 <b>{tr('Бесплатный перевыпуск', 'Free reissue')}</b>\n"
+                f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('ID заказа', 'Order ID')}: <code>{escape(command['order_id'])}</code>\n"
+                f"{tr('Статус', 'Status')}: ✅ {tr('выполнено', 'completed')}"
             , kind="pending")
             return True
         except Exception as exc:
             log.exception("Cannot process free reissue command from chat %s", invoice_id)
             await messenger.send_message("plati", invoice_id, delivery_service.operation_error_text("reissue", exc))
             notify_admins(
-                "🚨 <b>Ошибка бесплатного перевыпуска</b>\n"
-                f"Чат: <code>{escape(invoice_id)}</code>\n"
-                f"ID заказа: <code>{escape(command['order_id'])}</code>\n"
-                f"Ошибка: <code>{escape(str(exc))}</code>"
+                f"🚨 <b>{tr('Ошибка бесплатного перевыпуска', 'Free reissue error')}</b>\n"
+                f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('ID заказа', 'Order ID')}: <code>{escape(command['order_id'])}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>"
             , kind="errors")
             return True
 
@@ -636,9 +649,9 @@ def create_app() -> FastAPI:
                     payload=payload,
                 )
                 notify_admins(
-                    "🚨 <b>Ошибка обработки продажи GGsel</b>\n"
-                    f"Заказ: <code>{escape(order_id)}</code>\n"
-                    f"Ошибка: <code>{escape(str(exc))}</code>",
+                    f"🚨 <b>{tr('Ошибка обработки продажи GGsel', 'GGsel sale processing error')}</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                    f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
                     kind="errors",
                 )
         db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
@@ -713,10 +726,10 @@ def create_app() -> FastAPI:
                             delivery_service.command_mismatch_text(str(operation["action"]), wrong_command_action),
                         )
                         notify_admins(
-                            "⚠️ <b>Неверная команда в pending-заказе</b>\n"
-                            f"Заказ: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
-                            f"Ожидали: <b>{escape(action_label(str(operation['action'])))}</b>\n"
-                            f"Получили: <code>{escape(wrong_command_action)}</code>"
+                            f"⚠️ <b>{tr('Неверная команда в pending-заказе', 'Wrong command in pending order')}</b>\n"
+                            f"{tr('Заказ', 'Order')}: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
+                            f"{tr('Ожидали', 'Expected')}: <b>{escape(action_label(str(operation['action'])))}</b>\n"
+                            f"{tr('Получили', 'Received')}: <code>{escape(wrong_command_action)}</code>"
                         , kind="pending")
                         continue
                     if missing_command_order_id:
@@ -748,11 +761,11 @@ def create_app() -> FastAPI:
                         )
                         result = await delivery_service.complete_pending_operation(operation, found_order_id)
                         notify_admins(
-                            "✅ <b>Услуга применена</b>\n"
-                            f"Заказ: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
-                            f"Действие: <b>{escape(action_label(str(operation['action'])))}</b>\n"
-                            f"ID заказа: <code>{escape(found_order_id)}</code>\n"
-                            f"Статус: <b>{escape(str(result.get('status') or 'delivered'))}</b>"
+                            f"✅ <b>{tr('Услуга применена', 'Service applied')}</b>\n"
+                            f"{tr('Заказ', 'Order')}: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
+                            f"{tr('Действие', 'Action')}: <b>{escape(action_label(str(operation['action'])))}</b>\n"
+                            f"{tr('ID заказа', 'Order ID')}: <code>{escape(found_order_id)}</code>\n"
+                            f"{tr('Статус', 'Status')}: <b>{escape(str(result.get('status') or 'delivered'))}</b>"
                         , kind="pending")
                     except Exception as exc:
                         db.fail_pending_operation(int(operation["id"]), str(exc))
@@ -772,11 +785,11 @@ def create_app() -> FastAPI:
                             delivery_service.operation_error_text(str(operation["action"]), exc),
                         )
                         notify_admins(
-                            "🚨 <b>Ошибка pending-операции</b>\n"
-                            f"Заказ: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
-                            f"Действие: <b>{escape(action_label(str(operation['action'])))}</b>\n"
-                            f"ID заказа: <code>{escape(found_order_id)}</code>\n"
-                            f"Ошибка: <code>{escape(str(exc))}</code>"
+                            f"🚨 <b>{tr('Ошибка pending-операции', 'Pending operation error')}</b>\n"
+                            f"{tr('Заказ', 'Order')}: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
+                            f"{tr('Действие', 'Action')}: <b>{escape(action_label(str(operation['action'])))}</b>\n"
+                            f"{tr('ID заказа', 'Order ID')}: <code>{escape(found_order_id)}</code>\n"
+                            f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>"
                         , kind="errors")
                         continue
             except asyncio.CancelledError:
@@ -848,7 +861,17 @@ def create_app() -> FastAPI:
     async def restart_telegram_bot() -> dict[str, Any]:
         async with bot_lock:
             await stop_telegram_bot()
-            return await start_telegram_bot()
+            result = await start_telegram_bot()
+        if result.get("running"):
+            async def restart_notice() -> None:
+                await asyncio.sleep(1)
+                await notifier.send_admins(
+                    f"✅ <b>{tr('Telegram-бот перезапущен', 'Telegram bot restarted')}</b>\n"
+                    f"{tr('Бот снова работает.', 'The bot is running again.')}"
+                )
+
+            asyncio.create_task(restart_notice())
+        return result
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1293,7 +1316,10 @@ def create_app() -> FastAPI:
     @app.post("/admin/api/smoke-tests/telegram", dependencies=[Depends(require_admin)])
     async def admin_smoke_telegram() -> dict[str, Any]:
         try:
-            await notifier.send_admins("✅ <b>Тестовое уведомление</b>\nTelegram-уведомления работают.")
+            await notifier.send_admins(
+                f"✅ <b>{tr('Тестовое уведомление', 'Test notification')}</b>\n"
+                f"{tr('Telegram-уведомления работают.', 'Telegram notifications are working.')}"
+            )
             return {"status": "ok", "detail": "Test notification sent to admins"}
         except Exception as exc:
             return {"status": "error", "detail": str(exc)}

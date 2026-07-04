@@ -132,6 +132,7 @@ curl -fsSL https://raw.githubusercontent.com/Seno47/vpn-reseller-autoseller/main
 | --- | --- |
 | `Web panel login` | Логин для входа в панель, например `admin`. |
 | `Web panel password` | Надёжный пароль, минимум 8 символов. |
+| `Interface and Telegram bot language` | `ru` для русского интерфейса или `en` для английского. Шаблоны выдачи не переводятся автоматически. |
 | `Telegram bot token` | Токен бота от BotFather. Можно оставить пустым и заполнить позже. |
 | `Telegram admin ID` | Ваш Telegram ID. Обязательное поле. |
 | `XyraNet API key` | Ключ XyraNet. Можно оставить пустым и заполнить позже. |
@@ -283,7 +284,7 @@ http://127.0.0.1:8095
 Откройте `Настройки` и заполните:
 
 - `XyraNet API URL` - оставьте `https://xyranet.pro/api/wholesale`;
-- `Язык интерфейса` - выберите русский или английский язык для подписей настроек;
+- `Язык интерфейса` - выберите русский или английский язык для подписей настроек, Telegram-бота и админских уведомлений. Шаблоны выдачи остаются такими, как вы их написали;
 - `XyraNet API key` - ключ из личного кабинета XyraNet;
 - `Digiseller seller ID` и `Digiseller API key` - если используете Plati.Market/Digiseller;
 - `GGsel seller ID` и `GGsel API key` - если используете GGsel;

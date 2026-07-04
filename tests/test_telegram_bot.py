@@ -10,6 +10,13 @@ class TelegramBotMenuTests(unittest.TestCase):
 
         self.assertIn("🖥 Метрики", texts)
 
+    def test_main_menu_can_render_english(self) -> None:
+        keyboard = main_menu(is_owner=True, language="en")
+        texts = [button.text for row in keyboard.inline_keyboard for button in row]
+
+        self.assertIn("🖥 Metrics", texts)
+        self.assertIn("⚙️ Settings", texts)
+
 
 if __name__ == "__main__":
     unittest.main()
