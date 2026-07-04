@@ -34,10 +34,6 @@ ask_secret() {
   echo "$value"
 }
 
-random_secret() {
-  openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
-}
-
 write_env() {
   local env_file="$1"
   umask 077
@@ -59,7 +55,6 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 ADMIN_IDS=${ADMIN_IDS}
 ADMIN_USERNAME=${ADMIN_USERNAME}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
-ADMIN_TOKEN=${ADMIN_TOKEN}
 
 DATABASE_PATH=data/reseller.sqlite3
 PANEL_LANGUAGE=${PANEL_LANGUAGE}
@@ -185,8 +180,6 @@ else
   APP_BASE_URL="http://127.0.0.1:${APP_PORT}"
 fi
 
-ADMIN_TOKEN="$(random_secret)"
-
 install_source
 cd "$APP_DIR"
 python3 -m venv .venv
@@ -207,7 +200,6 @@ echo
 echo "Installed."
 echo "Service: systemctl status ${APP_NAME}"
 echo "Logs: journalctl -u ${APP_NAME} -f"
-echo "Admin API token saved in ${APP_DIR}/.env as ADMIN_TOKEN."
 if [ -n "$DOMAIN" ]; then
   echo "Panel: https://${DOMAIN}"
 else

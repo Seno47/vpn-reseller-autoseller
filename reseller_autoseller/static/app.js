@@ -1,4 +1,4 @@
-let adminToken = localStorage.getItem("reseller_admin_token") || "";
+let adminSessionToken = localStorage.getItem("reseller_admin_session") || "";
 let currentLanguage = localStorage.getItem("reseller_panel_language") || "ru";
 
 const RU_TO_EN = {
@@ -291,7 +291,7 @@ function setActiveSection(section) {
 function authHeaders(extra = {}) {
   return {
     ...extra,
-    Authorization: `Bearer ${adminToken}`,
+    Authorization: `Bearer ${adminSessionToken}`,
   };
 }
 
@@ -652,7 +652,8 @@ function hideLogin() {
 }
 
 function logout() {
-  adminToken = "";
+  adminSessionToken = "";
+  localStorage.removeItem("reseller_admin_session");
   localStorage.removeItem("reseller_admin_token");
   showLogin();
 }
@@ -1574,7 +1575,7 @@ async function loadOrderEvents() {
 }
 
 async function loadAll() {
-  if (!adminToken) {
+  if (!adminSessionToken) {
     showLogin();
     return;
   }
@@ -1620,6 +1621,9 @@ async function loadAll() {
     renderOrderEvents(eventsConfig);
     hideLogin();
   } catch (error) {
+    adminSessionToken = "";
+    localStorage.removeItem("reseller_admin_session");
+    localStorage.removeItem("reseller_admin_token");
     showLogin();
     loginError.textContent = t("Сессия не активна или логин/пароль неверные.", "Session is inactive or login/password is incorrect.");
   }
@@ -1639,8 +1643,9 @@ loginForm.addEventListener("submit", async (event) => {
       throw new Error("login failed");
     }
     const data = await response.json();
-    adminToken = data.token;
-    localStorage.setItem("reseller_admin_token", adminToken);
+    adminSessionToken = data.token;
+    localStorage.setItem("reseller_admin_session", adminSessionToken);
+    localStorage.removeItem("reseller_admin_token");
     loginForm.reset();
     await loadAll();
   } catch (_) {

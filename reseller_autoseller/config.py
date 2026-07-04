@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     admin_ids: list[int] = Field(default_factory=list)
     admin_username: str = "admin"
     admin_password: str = "change-me"
-    admin_token: str = "change-me"
 
     database_path: str = "data/reseller.sqlite3"
     panel_language: str = "ru"

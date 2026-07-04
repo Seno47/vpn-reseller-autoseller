@@ -164,7 +164,6 @@ def build_env(port: int, database_path: Path) -> dict[str, str]:
             "ADMIN_IDS": "123456789",
             "ADMIN_USERNAME": "admin",
             "ADMIN_PASSWORD": "benchmark-password",
-            "ADMIN_TOKEN": "benchmark-admin-token-1234567890",
             "XYRANET_API_KEY": "",
             "DIGISELLER_SELLER_ID": "",
             "DIGISELLER_API_KEY": "",

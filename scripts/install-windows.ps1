@@ -23,17 +23,6 @@ function Ask-Secret([string]$Prompt) {
   }
 }
 
-function New-AdminToken {
-  $bytes = New-Object byte[] 48
-  $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
-  try {
-    $rng.GetBytes($bytes)
-  } finally {
-    $rng.Dispose()
-  }
-  return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
-}
-
 function Env-Value([string]$Value) {
   if ($null -eq $Value) { return "" }
   if ($Value -match '^[A-Za-z0-9_./:@*+\-=]*$') { return $Value }
@@ -86,7 +75,6 @@ $digisellerSellerId = Ask "Digiseller seller ID (optional)" ""
 $digisellerApiKey = Ask-Secret "Digiseller API key (optional)"
 $ggselSellerId = Ask "GGsel seller ID (optional)" ""
 $ggselApiKey = Ask-Secret "GGsel API key (optional)"
-$adminToken = New-AdminToken
 
 @(
   "APP_HOST=127.0.0.1",
@@ -106,7 +94,6 @@ $adminToken = New-AdminToken
   "ADMIN_IDS=$(Env-Value $adminIds)",
   "ADMIN_USERNAME=$(Env-Value $adminUsername)",
   "ADMIN_PASSWORD=$(Env-Value $adminPassword)",
-  "ADMIN_TOKEN=$adminToken",
   "",
   "DATABASE_PATH=data/reseller.sqlite3",
   "PANEL_LANGUAGE=$panelLanguage",
@@ -122,7 +109,6 @@ if (-not (Test-Path ".venv")) {
 
 Write-Host
 Write-Host "Installed."
-Write-Host "ADMIN_TOKEN was generated automatically and saved to .env."
 Write-Host "Start the panel with:"
 Write-Host ".\.venv\Scripts\python.exe run.py"
 Write-Host "Then open: http://127.0.0.1:8095"

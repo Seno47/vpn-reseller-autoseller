@@ -67,7 +67,7 @@ DEFAULT_ADMIN_SECRET_VALUES = {
     "replace-with-strong-password",
 }
 MIN_ADMIN_PASSWORD_LENGTH = 8
-MIN_ADMIN_TOKEN_LENGTH = 24
+ADMIN_SESSION_TTL_SECONDS = 24 * 60 * 60
 LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
 
@@ -151,6 +151,7 @@ def create_app() -> FastAPI:
     recent_notifications: dict[str, float] = {}
     poll_error_notifications: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
+    admin_sessions: dict[str, float] = {}
 
     def notify_admins(text: str, kind: str = "errors") -> None:
         setting_key = f"notify_{kind}"
@@ -908,8 +909,29 @@ def create_app() -> FastAPI:
     def ensure_admin_secrets_are_safe() -> None:
         if unsafe_admin_secret(runtime.get_text("admin_password"), minimum_length=MIN_ADMIN_PASSWORD_LENGTH):
             raise HTTPException(status_code=503, detail="Set a strong ADMIN_PASSWORD before using the web panel")
-        if unsafe_admin_secret(settings.admin_token, minimum_length=MIN_ADMIN_TOKEN_LENGTH):
-            raise HTTPException(status_code=503, detail="Set a strong ADMIN_TOKEN before using the web panel")
+
+    def create_admin_session() -> str:
+        cleanup_admin_sessions()
+        token = secrets.token_urlsafe(48)
+        admin_sessions[token] = time.monotonic()
+        return token
+
+    def cleanup_admin_sessions() -> None:
+        now = time.monotonic()
+        for token, issued_at in list(admin_sessions.items()):
+            if now - issued_at > ADMIN_SESSION_TTL_SECONDS:
+                admin_sessions.pop(token, None)
+
+    def valid_admin_session(token: str) -> bool:
+        cleanup_admin_sessions()
+        issued_at = admin_sessions.get(token)
+        if issued_at is None:
+            return False
+        admin_sessions[token] = time.monotonic()
+        return True
+
+    def invalidate_admin_sessions() -> None:
+        admin_sessions.clear()
 
     def login_rate_key(request: Request, username: str) -> str:
         client_host = request.client.host if request.client else "unknown"
@@ -935,8 +957,8 @@ def create_app() -> FastAPI:
         token = ""
         if authorization and authorization.lower().startswith("bearer "):
             token = authorization[7:].strip()
-        if not token or token != settings.admin_token:
-            raise HTTPException(status_code=401, detail="Invalid admin token")
+        if not token or not valid_admin_session(token):
+            raise HTTPException(status_code=401, detail="Invalid admin session")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -957,7 +979,7 @@ def create_app() -> FastAPI:
             record_login_failure(rate_key)
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
         login_failures.pop(rate_key, None)
-        return {"token": settings.admin_token, "username": runtime.get_text("admin_username")}
+        return {"token": create_admin_session(), "username": runtime.get_text("admin_username")}
 
     @app.get("/admin/api/status", dependencies=[Depends(require_admin)])
     async def admin_status() -> dict[str, Any]:
@@ -1334,6 +1356,10 @@ def create_app() -> FastAPI:
             runtime.set_many(payload.settings)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if "admin_username" in payload.settings or (
+            "admin_password" in payload.settings and str(payload.settings.get("admin_password") or "").strip()
+        ):
+            invalidate_admin_sessions()
         return {"status": "ok", "settings": runtime.setting_payload()}
 
     @app.get("/admin/api/telegram/status", dependencies=[Depends(require_admin)])

@@ -15,13 +15,11 @@ class AdminSecurityTests(unittest.TestCase):
         tmp: str,
         *,
         password: str = "strong-password",
-        token: str = "abcdefghijklmnopqrstuvwxyz123456",
     ) -> TestClient:
         env = {
             "DATABASE_PATH": os.path.join(tmp, "test.sqlite3"),
             "ADMIN_USERNAME": "admin",
             "ADMIN_PASSWORD": password,
-            "ADMIN_TOKEN": token,
             "ADMIN_IDS": "123456789",
             "ENABLE_TELEGRAM": "false",
             "TELEGRAM_BOT_TOKEN": "",
@@ -35,7 +33,7 @@ class AdminSecurityTests(unittest.TestCase):
 
     def test_default_admin_secrets_block_login(self) -> None:
         with TemporaryDirectory() as tmp:
-            client = self.make_client(tmp, password="change-me", token="change-me")
+            client = self.make_client(tmp, password="change-me")
 
             response = client.post(
                 "/admin/api/login",
@@ -44,7 +42,7 @@ class AdminSecurityTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 503)
 
-    def test_login_returns_token_for_valid_credentials(self) -> None:
+    def test_login_returns_session_token_for_valid_credentials(self) -> None:
         with TemporaryDirectory() as tmp:
             client = self.make_client(tmp)
 
@@ -54,7 +52,56 @@ class AdminSecurityTests(unittest.TestCase):
             )
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["token"], "abcdefghijklmnopqrstuvwxyz123456")
+            self.assertGreater(len(response.json()["token"]), 24)
+
+    def test_password_change_invalidates_active_sessions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            old_token = login.json()["token"]
+            headers = {"Authorization": f"Bearer {old_token}"}
+
+            response = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"admin_password": "new-strong-password"}},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            old_session = client.get("/admin/api/status", headers=headers)
+            self.assertEqual(old_session.status_code, 401)
+
+            old_password = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            self.assertEqual(old_password.status_code, 401)
+
+            new_password = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "new-strong-password"},
+            )
+            self.assertEqual(new_password.status_code, 200)
+
+    def test_restart_invalidates_active_sessions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            token = login.json()["token"]
+            headers = {"Authorization": f"Bearer {token}"}
+            self.assertEqual(client.get("/admin/api/status", headers=headers).status_code, 200)
+            client.close()
+
+            restarted_client = self.make_client(tmp)
+            response = restarted_client.get("/admin/api/status", headers=headers)
+
+            self.assertEqual(response.status_code, 401)
 
     def test_failed_logins_are_rate_limited(self) -> None:
         with TemporaryDirectory() as tmp:
