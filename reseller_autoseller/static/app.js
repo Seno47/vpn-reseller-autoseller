@@ -2005,6 +2005,27 @@ document.addEventListener("mousedown", (event) => {
   }
 });
 
+settingsForm.addEventListener("change", async (event) => {
+  const field = event.target;
+  if (!(field instanceof HTMLSelectElement) || field.name !== "panel_language") {
+    return;
+  }
+  const language = field.value;
+  setLanguage(language);
+  field.disabled = true;
+  try {
+    await api("/admin/api/settings", {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({settings: {panel_language: language}}),
+    });
+    await loadAll();
+  } catch (error) {
+    alert(`${t("Не удалось сохранить язык", "Could not save language")}: ${error.message || error}`);
+    await loadAll();
+  }
+});
+
 settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const settings = {};
