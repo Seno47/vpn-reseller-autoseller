@@ -149,9 +149,12 @@ SETTING_ICONS = {
 }
 
 
-def setting_button_label(item: dict[str, Any]) -> str:
+def setting_button_label(runtime: RuntimeConfig, item: dict[str, Any]) -> str:
     icon = SETTING_ICONS.get(str(item["key"]), "⚙️")
     restart = " 🔄" if item["restart_required"] else ""
+    if item["kind"] == "boolean":
+        state_icon = "✅" if runtime.get_bool(str(item["key"])) else "❌"
+        return f"{state_icon} {icon} {item['label']}{restart}"
     return f"{icon} {item['label']}{restart}"
 
 
@@ -904,8 +907,9 @@ def build_dispatcher(
                 if not item:
                     continue
                 value = setting_value_label(runtime, item)
-                lines.append(f"{escape(setting_button_label(item))}: <code>{escape(value)}</code>")
-                group_buttons.append(InlineKeyboardButton(text=setting_button_label(item), callback_data=f"setting:edit:{item['key']}"))
+                label = setting_button_label(runtime, item)
+                lines.append(f"{escape(label)}: <code>{escape(value)}</code>")
+                group_buttons.append(InlineKeyboardButton(text=label, callback_data=f"setting:edit:{item['key']}"))
                 if len(group_buttons) == 2:
                     buttons.append(group_buttons)
                     group_buttons = []
