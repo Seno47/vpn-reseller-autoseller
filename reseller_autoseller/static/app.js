@@ -1,4 +1,192 @@
 let adminToken = localStorage.getItem("reseller_admin_token") || "";
+let currentLanguage = localStorage.getItem("reseller_panel_language") || "ru";
+
+const RU_TO_EN = {
+  "Вход в админ-панель автопродаж": "Autoseller admin panel login",
+  "Логин": "Login",
+  "Пароль": "Password",
+  "Войти": "Sign in",
+  "Polling-выдача VPN-доступов через Wholesale API": "Polling delivery of VPN access via Wholesale API",
+  "Обновить": "Refresh",
+  "Выйти": "Log out",
+  "Маппинг": "Mapping",
+  "Шаблоны": "Templates",
+  "Переменные": "Variables",
+  "Статистика": "Statistics",
+  "Диагностика": "Diagnostics",
+  "Настройки": "Settings",
+  "Продажи": "Sales",
+  "Новый / редактируемый маппинг": "New / editable mapping",
+  "Ссылка / данные лота": "Lot link / data",
+  "Распарсить": "Parse",
+  "Площадка": "Marketplace",
+  "ID лота": "Lot ID",
+  "Кнопка / вариант": "Button / variant",
+  "Действие": "Action",
+  "Новая подписка": "New subscription",
+  "Продление": "Renewal",
+  "Перевыпуск": "Reissue",
+  "LTE-трафик": "LTE traffic",
+  "IP-лимит": "IP limit",
+  "Параметры": "Parameters",
+  "Объём": "Amount",
+  "На весь срок подписки": "For the full subscription term",
+  "Месяцев": "Months",
+  "Тариф": "Tariff",
+  "Название": "Title",
+  "Сохранить": "Save",
+  "Очистить": "Clear",
+  "Готовый маппинг": "Saved mapping",
+  "Поиск": "Search",
+  "Лот": "Lot",
+  "Вариант": "Variant",
+  "Статус": "Status",
+  "Действия": "Actions",
+  "Шаблоны выдачи": "Delivery templates",
+  "Вид действия": "Action type",
+  "Этап сообщения": "Message stage",
+  "Команда": "Command",
+  "Текст сообщения": "Message text",
+  "Вставить стандартный": "Insert default",
+  "Сбросить": "Reset",
+  "Сохранить шаблон": "Save template",
+  "Составные переменные": "Composite variables",
+  "Переменная": "Variable",
+  "Новая": "New",
+  "Удалить": "Delete",
+  "Имя токена": "Token name",
+  "Используйте латиницу, цифры и подчёркивание. В шаблонах вставляется как {CUSTOM_HELP}.": "Use Latin letters, digits, and underscores. In templates it is inserted as {CUSTOM_HELP}.",
+  "Только для удобства в панели.": "Only for convenience in the panel.",
+  "Шаблон переменной": "Variable template",
+  "Вставить стандартный": "Insert default",
+  "Сохранить переменную": "Save variable",
+  "Здесь можно собирать большой блок из обычных переменных. После сохранения новый токен появится в редакторе шаблонов.": "Here you can build a large block from ordinary variables. After saving, the new token will appear in the template editor.",
+  "Перезапустить Telegram-бота": "Restart Telegram bot",
+  "Доступ к боту": "Bot access",
+  "Подпись": "Label",
+  "Добавить": "Add",
+  "Источник": "Source",
+  "Период": "Period",
+  "Сегодня": "Today",
+  "Вчера": "Yesterday",
+  "7 дней": "7 days",
+  "30 дней": "30 days",
+  "90 дней": "90 days",
+  "Всё время": "All time",
+  "По площадкам": "By marketplace",
+  "По действиям": "By action",
+  "Тарифы": "Tariffs",
+  "Динамика": "Dynamics",
+  "День": "Day",
+  "Сумма": "Amount",
+  "Расход": "Expense",
+  "Прибыль": "Profit",
+  "Последние продажи": "Latest sales",
+  "Заказ": "Order",
+  "Дата": "Date",
+  "Проверки и бэкап": "Checks and backup",
+  "Скачать бэкап": "Download backup",
+  "Нагрузка сервера": "Server load",
+  "Pending-операции": "Pending operations",
+  "Ожидают order_id": "Waiting for order_id",
+  "Ошибки": "Errors",
+  "Завершённые": "Completed",
+  "Все": "All",
+  "Ошибка": "Error",
+  "История событий": "Event history",
+  "Событие": "Event",
+  "Сообщение": "Message",
+  "Показать": "Show",
+  "Поля лота и варианта можно заполнить автоматически": "Lot and variant fields can be filled automatically",
+  "Если у лота есть кнопки, они появятся после парсинга": "If the lot has buttons, they will appear after parsing",
+  "Выберите тариф из списка": "Choose a tariff from the list",
+  "Команда, которую ждём в чате для этого сценария": "Command expected in chat for this scenario",
+  "Переменные можно вставлять кнопками и удалять обычным текстом. Поддерживается формат {ORDER_ID} и старый ${order_id}.": "Variables can be inserted with buttons and removed as ordinary text. The {ORDER_ID} format and old ${order_id} format are supported.",
+  "Пусто = стандартное сообщение": "Empty = default message",
+  "Моя подсказка": "My hint",
+  "Менеджер": "Manager",
+  "Площадка, лот, вариант, тариф, название": "Marketplace, lot, variant, tariff, title",
+  "Вставьте ссылку Plati/GGsel, JSON payload или id_goods=5968452&variant_id=42": "Paste a Plati/GGsel link, JSON payload, or id_goods=5968452&variant_id=42",
+  "Выберите кнопку или вставьте variant_id": "Choose a button or paste variant_id",
+  "Начните вводить lite, pro, 30 дн...": "Start typing lite, pro, 30 days...",
+  "Площадка": "Marketplace",
+  "ID заказа/чата": "Order/chat ID",
+  "Встроенные": "Built-in",
+  "Свои": "Custom",
+  "Прочее": "Other",
+  "Покупка": "Purchase",
+  "Заказ выдан": "Order delivered",
+  "Команда без ID заказа": "Command without order ID",
+  "Бесплатный перевыпуск отключён": "Free reissue disabled",
+  "Заказ получен, ждём order_id": "Order received, waiting for order_id",
+  "order_id получен, продление выполнено": "order_id received, renewal completed",
+  "Команда не совпала с лотом": "Command does not match the lot",
+  "Ошибка выполнения": "Operation error",
+  "Платный заказ получен, ждём order_id": "Paid order received, waiting for order_id",
+  "order_id получен, перевыпуск выполнен": "order_id received, reissue completed",
+  "Бесплатная команда без ID": "Free command without ID",
+  "Бесплатный режим отключён": "Free mode disabled",
+  "order_id получен, LTE добавлен": "order_id received, LTE added",
+  "order_id получен, IP-лимит увеличен": "order_id received, IP limit increased"
+};
+
+const textNodeOriginals = new WeakMap();
+
+function t(ru, en = "") {
+  return currentLanguage === "en" ? (en || RU_TO_EN[ru] || ru) : ru;
+}
+
+function setLanguage(language) {
+  currentLanguage = String(language || "ru").toLowerCase().startsWith("en") ? "en" : "ru";
+  localStorage.setItem("reseller_panel_language", currentLanguage);
+  document.documentElement.lang = currentLanguage;
+  applyStaticTranslations();
+}
+
+function preserveWhitespace(original, translated) {
+  const leading = original.match(/^\s*/)?.[0] || "";
+  const trailing = original.match(/\s*$/)?.[0] || "";
+  return `${leading}${translated}${trailing}`;
+}
+
+function applyStaticTranslations() {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue.trim()) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      const parent = node.parentElement;
+      if (!parent || ["SCRIPT", "STYLE"].includes(parent.tagName)) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  while (walker.nextNode()) {
+    nodes.push(walker.currentNode);
+  }
+  nodes.forEach((node) => {
+    if (!textNodeOriginals.has(node)) {
+      textNodeOriginals.set(node, node.nodeValue);
+    }
+    const original = textNodeOriginals.get(node);
+    const key = original.trim();
+    node.nodeValue = preserveWhitespace(original, t(key));
+  });
+  document.querySelectorAll("[placeholder]").forEach((element) => {
+    if (!element.dataset.placeholderOriginal) {
+      element.dataset.placeholderOriginal = element.getAttribute("placeholder") || "";
+    }
+    element.setAttribute("placeholder", t(element.dataset.placeholderOriginal));
+  });
+  document.querySelectorAll("[aria-label]").forEach((element) => {
+    if (!element.dataset.ariaLabelOriginal) {
+      element.dataset.ariaLabelOriginal = element.getAttribute("aria-label") || "";
+    }
+    element.setAttribute("aria-label", t(element.dataset.ariaLabelOriginal));
+  });
+}
 
 const loginScreen = document.querySelector("#loginScreen");
 const loginForm = document.querySelector("#loginForm");
@@ -89,6 +277,8 @@ let statisticsData = null;
 let pendingRows = [];
 let orderEventRows = [];
 
+setLanguage(currentLanguage);
+
 function setActiveSection(section) {
   sectionTabs.forEach((button) => {
     button.classList.toggle("active", button.dataset.sectionTab === section);
@@ -153,7 +343,7 @@ function positiveNumber(value, label) {
   const normalized = String(value || "").replace(",", ".").trim();
   const number = Number(normalized);
   if (!Number.isFinite(number) || number <= 0) {
-    throw new Error(`${label}: укажите число больше 0.`);
+    throw new Error(`${label}: ${t("укажите число больше 0.", "enter a number greater than 0.")}`);
   }
   return Number.isInteger(number) ? number : Number(number.toFixed(2));
 }
@@ -161,7 +351,7 @@ function positiveNumber(value, label) {
 function positiveInteger(value, label) {
   const number = positiveNumber(value, label);
   if (!Number.isInteger(number)) {
-    throw new Error(`${label}: укажите целое число.`);
+    throw new Error(`${label}: ${t("укажите целое число.", "enter an integer.")}`);
   }
   return number;
 }
@@ -219,14 +409,14 @@ function renderComplexVariableOptions() {
   const optionHtml = [];
   if (builtin.length) {
     optionHtml.push(`
-      <optgroup label="Встроенные">
+      <optgroup label="${t("Встроенные", "Built-in")}">
         ${builtin.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.token)} · ${escapeHtml(item.label)}</option>`).join("")}
       </optgroup>
     `);
   }
   if (custom.length) {
     optionHtml.push(`
-      <optgroup label="Свои">
+      <optgroup label="${t("Свои", "Custom")}">
         ${custom.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.token)} · ${escapeHtml(item.label)}</option>`).join("")}
       </optgroup>
     `);
@@ -255,7 +445,7 @@ function syncComplexVariableEditor() {
     complexVariableKey.value = "";
     complexVariableLabel.value = "";
     complexVariableTemplate.value = "";
-    complexVariableInfo.textContent = "Создайте переменную, затем используйте её токен в шаблонах выдачи.";
+    complexVariableInfo.textContent = t("Создайте переменную, затем используйте её токен в шаблонах выдачи.", "Create a variable, then use its token in delivery templates.");
     complexVariableKey.focus();
     return;
   }
@@ -295,7 +485,7 @@ function renderTemplateActionOptions() {
   const current = templateActionSelect.value;
   const groups = new Map();
   deliveryTemplateActions.forEach((action) => {
-    const category = action.category || "Прочее";
+    const category = t(action.category || "Прочее");
     if (!groups.has(category)) {
       groups.set(category, []);
     }
@@ -304,7 +494,7 @@ function renderTemplateActionOptions() {
   templateActionSelect.innerHTML = Array.from(groups.entries()).map(([category, actions]) => `
     <optgroup label="${escapeHtml(category)}">
       ${actions.map((action) => (
-        `<option value="${escapeHtml(action.key)}">${escapeHtml(action.label)}</option>`
+        `<option value="${escapeHtml(action.key)}">${escapeHtml(t(action.label))}</option>`
       )).join("")}
     </optgroup>
   `).join("");
@@ -334,7 +524,7 @@ function selectedTemplateGroup() {
 function renderTemplateActionOptions() {
   const current = templateActionSelect.value;
   templateActionSelect.innerHTML = deliveryTemplateGroups.map((group) => (
-    `<option value="${escapeHtml(group.key)}">${escapeHtml(group.label)}</option>`
+    `<option value="${escapeHtml(group.key)}">${escapeHtml(t(group.label))}</option>`
   )).join("");
   if (deliveryTemplateGroups.some((group) => group.key === current)) {
     templateActionSelect.value = current;
@@ -348,7 +538,7 @@ function renderTemplateStageOptions() {
   const current = templateStageSelect.value;
   const stages = group?.stages || [];
   templateStageSelect.innerHTML = stages.map((stage) => (
-    `<option value="${escapeHtml(stage.key)}">${escapeHtml(stage.label)}</option>`
+    `<option value="${escapeHtml(stage.key)}">${escapeHtml(t(stage.label))}</option>`
   )).join("");
   if (stages.some((stage) => stage.key === current)) {
     templateStageSelect.value = current;
@@ -383,7 +573,7 @@ function updateActionParamsVisibility({reset = false} = {}) {
   if (needsTariff) {
     updateTariffHint();
   } else {
-    tariffHint.textContent = "Для этого действия тариф не нужен";
+    tariffHint.textContent = t("Для этого действия тариф не нужен", "This action does not need a tariff");
   }
   actionParamsField.classList.toggle("hidden", !needsParams);
   if (!needsParams) {
@@ -398,23 +588,23 @@ function updateActionParamsVisibility({reset = false} = {}) {
   }
 
   if (action === "traffic") {
-    actionParamsTitle.textContent = "LTE-трафик";
-    setLabelText(actionParamAmountField, "Сколько добавить, ГБ");
-    actionParamAmount.placeholder = "например 10";
+    actionParamsTitle.textContent = t("LTE-трафик", "LTE traffic");
+    setLabelText(actionParamAmountField, t("Сколько добавить, ГБ", "Amount to add, GB"));
+    actionParamAmount.placeholder = t("например 10", "for example 10");
     actionParamFullPeriodField.classList.add("hidden");
     actionParamMonthsField.classList.add("hidden");
-    actionParamsHint.textContent = "Введите объём пополнения. В API будет отправлено: " + actionParamJsonExample(action);
+    actionParamsHint.textContent = t("Введите объём пополнения. В API будет отправлено: ", "Enter the top-up amount. The API payload will be: ") + actionParamJsonExample(action);
     return;
   }
 
-  actionParamsTitle.textContent = "IP-лимит";
-  setLabelText(actionParamAmountField, "Сколько IP добавить");
-  actionParamAmount.placeholder = "например 1";
+  actionParamsTitle.textContent = t("IP-лимит", "IP limit");
+  setLabelText(actionParamAmountField, t("Сколько IP добавить", "How many IPs to add"));
+  actionParamAmount.placeholder = t("например 1", "for example 1");
   actionParamFullPeriodField.classList.remove("hidden");
   actionParamMonthsField.classList.toggle("hidden", actionParamFullPeriod.checked);
   actionParamsHint.textContent = actionParamFullPeriod.checked
-    ? "Ручной режим: используйте только если цена на витрине уже рассчитана на весь оставшийся срок подписки."
-    : "По умолчанию IP добавляется на 1 месяц. Для Digiseller удобно делать отдельные кнопки на 1/3/6/12 месяцев. В API будет отправлено: " + actionParamJsonExample(action);
+    ? t("Ручной режим: используйте только если цена на витрине уже рассчитана на весь оставшийся срок подписки.", "Manual mode: use it only if the storefront price is already calculated for the remaining subscription term.")
+    : t("По умолчанию IP добавляется на 1 месяц. Для Digiseller удобно делать отдельные кнопки на 1/3/6/12 месяцев. В API будет отправлено: ", "By default, IP is added for 1 month. For Digiseller, separate 1/3/6/12 month buttons are convenient. The API payload will be: ") + actionParamJsonExample(action);
 }
 
 function fillActionParamControls(params) {
@@ -438,15 +628,15 @@ function fillActionParamControls(params) {
 function buildActionParamsFromControls() {
   const action = productForm.elements.action.value;
   if (action === "traffic") {
-    return {gigabytes: positiveNumber(actionParamAmount.value, "LTE-трафик")};
+    return {gigabytes: positiveNumber(actionParamAmount.value, t("LTE-трафик", "LTE traffic"))};
   }
   if (action === "ip_limit") {
     const params = {
-      extra_ip_count: positiveInteger(actionParamAmount.value, "IP-лимит"),
+      extra_ip_count: positiveInteger(actionParamAmount.value, t("IP-лимит", "IP limit")),
       full_period: actionParamFullPeriod.checked,
     };
     if (!params.full_period) {
-      params.months = positiveInteger(actionParamMonths.value, "Срок IP-лимита");
+      params.months = positiveInteger(actionParamMonths.value, t("Срок IP-лимита", "IP limit period"));
     }
     return params;
   }
@@ -489,13 +679,13 @@ function renderMetrics(status, summary, system = null) {
   const memory = system?.memory?.percent;
   const disk = system?.disk?.percent;
   metrics.innerHTML = `
-    <article class="metric"><span>Маппингов</span><strong>${status.products}</strong></article>
-    <article class="metric"><span>Продаж</span><strong>${status.sales}</strong></article>
+    <article class="metric"><span>${t("Маппингов", "Mappings")}</span><strong>${status.products}</strong></article>
+    <article class="metric"><span>${t("Продаж", "Sales")}</span><strong>${status.sales}</strong></article>
     <article class="metric"><span>Telegram</span><strong>${telegram}</strong><small>${status.bot_admins || 0} admin</small></article>
-    <article class="metric"><span>Баланс</span><strong>${escapeHtml(balance)}</strong></article>
-    <article class="metric"><span>CPU</span><strong>${escapeHtml(percentText(cpu))}</strong><small>${system?.cpu?.cores || "n/a"} ядер</small></article>
+    <article class="metric"><span>${t("Баланс", "Balance")}</span><strong>${escapeHtml(balance)}</strong></article>
+    <article class="metric"><span>CPU</span><strong>${escapeHtml(percentText(cpu))}</strong><small>${system?.cpu?.cores || "n/a"} ${t("ядер", "cores")}</small></article>
     <article class="metric"><span>RAM</span><strong>${escapeHtml(percentText(memory))}</strong><small>${escapeHtml(mbText(system?.memory?.used_mb))} / ${escapeHtml(mbText(system?.memory?.total_mb))}</small></article>
-    <article class="metric"><span>Диск</span><strong>${escapeHtml(percentText(disk))}</strong><small>${escapeHtml(mbText(system?.disk?.free_mb))} свободно</small></article>
+    <article class="metric"><span>${t("Диск", "Disk")}</span><strong>${escapeHtml(percentText(disk))}</strong><small>${escapeHtml(mbText(system?.disk?.free_mb))} ${t("свободно", "free")}</small></article>
   `;
 }
 
@@ -504,20 +694,20 @@ function renderSystemMetrics(system) {
     return;
   }
   if (!system) {
-    systemMetrics.innerHTML = `<p class="notice">Метрики сервера пока недоступны.</p>`;
+    systemMetrics.innerHTML = `<p class="notice">${t("Метрики сервера пока недоступны.", "Server metrics are unavailable.")}</p>`;
     return;
   }
   const loadAverage = Array.isArray(system.cpu?.load_average)
     ? system.cpu.load_average.map((item) => Number(item).toFixed(2)).join(" / ")
     : "n/a";
   const rows = [
-    ["CPU", percentText(system.cpu?.percent), `${system.cpu?.cores || "n/a"} ядер · load ${loadAverage}`],
-    ["RAM", percentText(system.memory?.percent), `${mbText(system.memory?.used_mb)} / ${mbText(system.memory?.total_mb)} · свободно ${mbText(system.memory?.available_mb)}`],
+    ["CPU", percentText(system.cpu?.percent), `${system.cpu?.cores || "n/a"} ${t("ядер", "cores")} · load ${loadAverage}`],
+    ["RAM", percentText(system.memory?.percent), `${mbText(system.memory?.used_mb)} / ${mbText(system.memory?.total_mb)} · ${t("свободно", "free")} ${mbText(system.memory?.available_mb)}`],
     ["Swap", `${mbText(system.memory?.swap_used_mb)}`, `total ${mbText(system.memory?.swap_total_mb)}`],
-    ["Диск", percentText(system.disk?.percent), `${mbText(system.disk?.used_mb)} / ${mbText(system.disk?.total_mb)} · свободно ${mbText(system.disk?.free_mb)}`],
-    ["Процесс", `${mbText(system.process?.rss_mb)}`, `CPU ${percentText(system.process?.cpu_percent)} · PID ${system.process?.pid || "n/a"}`],
-    ["Аптайм", system.uptime || "n/a", `приложение ${system.process?.uptime || "n/a"}`],
-    ["Хост", system.hostname || "n/a", system.platform || "n/a"],
+    [t("Диск", "Disk"), percentText(system.disk?.percent), `${mbText(system.disk?.used_mb)} / ${mbText(system.disk?.total_mb)} · ${t("свободно", "free")} ${mbText(system.disk?.free_mb)}`],
+    [t("Процесс", "Process"), `${mbText(system.process?.rss_mb)}`, `CPU ${percentText(system.process?.cpu_percent)} · PID ${system.process?.pid || "n/a"}`],
+    [t("Аптайм", "Uptime"), system.uptime || "n/a", `${t("приложение", "app")} ${system.process?.uptime || "n/a"}`],
+    [t("Хост", "Host"), system.hostname || "n/a", system.platform || "n/a"],
     ["Python", system.python || "n/a", system.machine || ""],
   ];
   systemMetrics.innerHTML = rows.map(([label, value, detail]) => `
@@ -543,25 +733,26 @@ function revenueText(row) {
 }
 
 function actionLabel(action) {
-  return {
-    create: "Покупка",
-    renew: "Продление",
-    reissue: "Перевыпуск",
-    traffic: "LTE-трафик",
-    ip_limit: "IP-лимит",
+  const labels = {
+    create: t("Покупка", "Purchase"),
+    renew: t("Продление", "Renewal"),
+    reissue: t("Перевыпуск", "Reissue"),
+    traffic: t("LTE-трафик", "LTE traffic"),
+    ip_limit: t("IP-лимит", "IP limit"),
   }[action] || action;
+  return labels;
 }
 
 function renderStatisticsTable(target, rows, labelMapper = (value) => value) {
   target.innerHTML = rows.map((row) => `
     <tr>
       <td>${escapeHtml(labelMapper(row.label || row.key))}</td>
-      <td>${row.sales_count}<br><small>${row.delivered_count} выдано · ${row.pending_count} ждёт</small></td>
+      <td>${row.sales_count}<br><small>${row.delivered_count} ${t("выдано", "delivered")} · ${row.pending_count} ${t("ждёт", "pending")}</small></td>
       <td>${revenueText(row)}</td>
       <td>${escapeHtml(moneyText(row.expense_rub))}</td>
-      <td>${escapeHtml(moneyText(row.profit_rub))}<br><small>${row.margin_percent === null ? "маржа n/a" : `${row.margin_percent}%`}</small></td>
+      <td>${escapeHtml(moneyText(row.profit_rub))}<br><small>${row.margin_percent === null ? t("маржа n/a", "margin n/a") : `${row.margin_percent}%`}</small></td>
     </tr>
-  `).join("") || `<tr><td colspan="5"><span class="muted">Нет данных за период</span></td></tr>`;
+  `).join("") || `<tr><td colspan="5"><span class="muted">${t("Нет данных за период", "No data for the period")}</span></td></tr>`;
 }
 
 function renderStatistics(data) {
@@ -570,17 +761,17 @@ function renderStatistics(data) {
   const period = data?.period || {};
   const unknownExpense = Number(totals.expense_unknown_count || 0);
   const expenseNote = unknownExpense
-    ? `${unknownExpense} выданных заказов без известной себестоимости`
-    : "по сохранённым API-ответам";
+    ? `${unknownExpense} ${t("выданных заказов без известной себестоимости", "delivered orders without known cost")}`
+    : t("по сохранённым API-ответам", "from saved API responses");
   const profitNote = unknownExpense
-    ? "прибыль неполная"
-    : (totals.margin_percent === null ? "маржа n/a" : `маржа ${totals.margin_percent}%`);
+    ? t("прибыль неполная", "profit is incomplete")
+    : (totals.margin_percent === null ? t("маржа n/a", "margin n/a") : `${t("маржа", "margin")} ${totals.margin_percent}%`);
   statisticsMetrics.innerHTML = `
-    <article class="stat-card"><span>Период</span><strong>${escapeHtml(period.label || "")}</strong><small>${escapeHtml(period.from ? period.from.slice(0, 10) : "всё время")}</small></article>
-    <article class="stat-card"><span>Продаж</span><strong>${totals.sales_count || 0}</strong><small>${totals.delivered_count || 0} выдано · ${totals.pending_count || 0} ждёт</small></article>
-    <article class="stat-card"><span>Сумма продаж</span><strong>${revenueText(totals)}</strong><small>по валютам площадок</small></article>
-    <article class="stat-card"><span>Расход XyraNet</span><strong>${escapeHtml(moneyText(totals.expense_rub))}</strong><small>${escapeHtml(expenseNote)}</small></article>
-    <article class="stat-card"><span>Прибыль</span><strong>${escapeHtml(moneyText(totals.profit_rub))}</strong><small>${escapeHtml(profitNote)} · чек ${escapeHtml(moneyText(totals.avg_order_rub))}</small></article>
+    <article class="stat-card"><span>${t("Период", "Period")}</span><strong>${escapeHtml(t(period.label || ""))}</strong><small>${escapeHtml(period.from ? period.from.slice(0, 10) : t("всё время", "all time"))}</small></article>
+    <article class="stat-card"><span>${t("Продаж", "Sales")}</span><strong>${totals.sales_count || 0}</strong><small>${totals.delivered_count || 0} ${t("выдано", "delivered")} · ${totals.pending_count || 0} ${t("ждёт", "pending")}</small></article>
+    <article class="stat-card"><span>${t("Сумма продаж", "Revenue")}</span><strong>${revenueText(totals)}</strong><small>${t("по валютам площадок", "by marketplace currencies")}</small></article>
+    <article class="stat-card"><span>${t("Расход XyraNet", "XyraNet cost")}</span><strong>${escapeHtml(moneyText(totals.expense_rub))}</strong><small>${escapeHtml(expenseNote)}</small></article>
+    <article class="stat-card"><span>${t("Прибыль", "Profit")}</span><strong>${escapeHtml(moneyText(totals.profit_rub))}</strong><small>${escapeHtml(profitNote)} · ${t("чек", "avg")} ${escapeHtml(moneyText(totals.avg_order_rub))}</small></article>
   `;
   renderStatisticsTable(statisticsMarketplaces, data?.marketplaces || []);
   renderStatisticsTable(statisticsActions, data?.actions || [], actionLabel);
@@ -595,23 +786,23 @@ function renderProducts(rows) {
       <td>#${row.id}</td>
       <td>${escapeHtml(row.marketplace)}</td>
       <td>${escapeHtml(row.external_product_id)}<br><small>${escapeHtml(row.title || "")}</small></td>
-      <td>${row.external_variant_id ? `<code>${escapeHtml(row.external_variant_id)}</code>` : "<span class=\"muted\">общий</span>"}</td>
+      <td>${row.external_variant_id ? `<code>${escapeHtml(row.external_variant_id)}</code>` : `<span class="muted">${t("общий", "common")}</span>`}</td>
       <td>
         <code>${escapeHtml(row.tariff_code || "-")}</code><br>
         <small>${escapeHtml(row.action || "create")}</small>
       </td>
       <td><button class="secondary" data-toggle="${row.id}" data-enabled="${row.enabled ? "0" : "1"}">
-        <span class="pill ${row.enabled ? "" : "off"}">${row.enabled ? "включен" : "выключен"}</span>
+        <span class="pill ${row.enabled ? "" : "off"}">${row.enabled ? t("включен", "enabled") : t("выключен", "disabled")}</span>
       </button></td>
       <td>
         <div class="row-actions">
-          <button class="secondary" data-product-edit="${row.id}" type="button">Редактировать</button>
-          <button class="danger" data-product-delete="${row.id}" type="button">Удалить</button>
+          <button class="secondary" data-product-edit="${row.id}" type="button">${t("Редактировать", "Edit")}</button>
+          <button class="danger" data-product-delete="${row.id}" type="button">${t("Удалить", "Delete")}</button>
         </div>
       </td>
     </tr>
   `).join("") || `
-    <tr><td colspan="7"><span class="muted">Ничего не найдено</span></td></tr>
+    <tr><td colspan="7"><span class="muted">${t("Ничего не найдено", "Nothing found")}</span></td></tr>
   `;
   document.querySelectorAll("[data-toggle]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -633,7 +824,7 @@ function renderProducts(rows) {
   });
   document.querySelectorAll("[data-product-delete]").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("Удалить этот маппинг?")) {
+      if (!confirm(t("Удалить этот маппинг?", "Delete this mapping?"))) {
         return;
       }
       await api(`/admin/api/products/${button.dataset.productDelete}`, {method: "DELETE"});
@@ -870,7 +1061,7 @@ async function parseMappingSourceFull(text) {
   if (!shouldFetchLotPage(text)) {
     return local;
   }
-  mappingParseStatus.textContent = "Загружаю страницу лота и ищу кнопки...";
+  mappingParseStatus.textContent = t("Загружаю страницу лота и ищу кнопки...", "Loading lot page and looking for buttons...");
   const remote = await api("/admin/api/parse-lot", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -920,7 +1111,7 @@ function availableVariantRows(value = "") {
 function renderVariantDropdown(value = "", open = true) {
   const rows = availableVariantRows(value);
   if (!rows.length) {
-    variantDropdown.innerHTML = `<div class="variant-empty">${variantRows.length ? "Все кнопки этого лота уже добавлены" : "Кнопки не найдены"}</div>`;
+    variantDropdown.innerHTML = `<div class="variant-empty">${variantRows.length ? t("Все кнопки этого лота уже добавлены", "All buttons for this lot have already been added") : t("Кнопки не найдены", "No buttons found")}</div>`;
   } else {
     variantDropdown.innerHTML = rows.map((row) => `
       <button class="variant-option" type="button" data-variant="${escapeHtml(row.id)}">
@@ -935,11 +1126,11 @@ function setVariantRows(rows) {
   variantRows = Array.isArray(rows) ? rows : [];
   if (!variantRows.length) {
     variantDropdown.classList.add("hidden");
-    variantHint.textContent = "Если у лота есть кнопки, они появятся после парсинга";
+    variantHint.textContent = t("Если у лота есть кнопки, они появятся после парсинга", "If the lot has buttons, they will appear after parsing");
     return;
   }
   const availableCount = availableVariantRows("").length;
-  variantHint.textContent = `Доступно кнопок: ${availableCount} из ${variantRows.length}`;
+  variantHint.textContent = `${t("Доступно кнопок", "Available buttons")}: ${availableCount} ${t("из", "of")} ${variantRows.length}`;
   renderVariantDropdown("", false);
 }
 
@@ -948,7 +1139,7 @@ function refreshVariantAvailability() {
     return;
   }
   const availableCount = availableVariantRows("").length;
-  variantHint.textContent = `Доступно кнопок: ${availableCount} из ${variantRows.length}`;
+  variantHint.textContent = `${t("Доступно кнопок", "Available buttons")}: ${availableCount} ${t("из", "of")} ${variantRows.length}`;
   renderVariantDropdown(variantSearch.value, false);
 }
 
@@ -956,14 +1147,14 @@ function selectVariant(id) {
   const selected = variantRows.find((row) => row.id === id);
   variantSearch.value = selected ? selected.id : id;
   variantDropdown.classList.add("hidden");
-  variantHint.textContent = selected ? `Выбрано: ${variantLabel(selected)}` : `Выбрано: ${id}`;
+  variantHint.textContent = selected ? `${t("Выбрано", "Selected")}: ${variantLabel(selected)}` : `${t("Выбрано", "Selected")}: ${id}`;
 }
 
 function setMappingEditMode(productId) {
   editingProductId = productId ? Number(productId) : null;
   const saveButton = productForm.querySelector(".mapping-form-actions button[type=\"submit\"]");
   if (saveButton) {
-    saveButton.textContent = editingProductId ? "Сохранить правки" : "Сохранить";
+    saveButton.textContent = editingProductId ? t("Сохранить правки", "Save changes") : t("Сохранить", "Save");
   }
 }
 
@@ -985,9 +1176,9 @@ function editProductMapping(row) {
   updateTariffHint();
   renderVariantDropdown("", false);
   variantHint.textContent = row.external_variant_id
-    ? `Редактируется: ${row.external_variant_id}`
-    : "Редактируется общий маппинг";
-  mappingParseStatus.textContent = `Редактирование маппинга #${row.id}`;
+    ? `${t("Редактируется", "Editing")}: ${row.external_variant_id}`
+    : t("Редактируется общий маппинг", "Editing common mapping");
+  mappingParseStatus.textContent = `${t("Редактирование маппинга", "Editing mapping")} #${row.id}`;
   productForm.scrollIntoView({behavior: "smooth", block: "start"});
 }
 
@@ -1000,34 +1191,34 @@ function applyParsedMapping(parsed, options = {}) {
 
   if (parsed.marketplace && marketplaceSelect.querySelector(`option[value="${parsed.marketplace}"]`)) {
     marketplaceSelect.value = parsed.marketplace;
-    applied.push("площадка");
+    applied.push(t("площадка", "marketplace"));
   }
   if (parsed.productId && (!productInput.value || options.force)) {
     productInput.value = parsed.productId;
-    applied.push("ID лота");
+    applied.push(t("ID лота", "lot ID"));
   }
   if (parsed.variantId && (!variantInput.value || options.force)) {
     variantInput.value = parsed.variantId;
-    applied.push("вариант");
+    applied.push(t("вариант", "variant"));
   }
   if (options.force && !parsed.variantId) {
     variantInput.value = "";
   }
   if (parsed.title && titleInput && (!titleInput.value || options.force)) {
     titleInput.value = parsed.title;
-    applied.push("название");
+    applied.push(t("название", "title"));
   }
   setVariantRows(parsed.variants || []);
   if (!parsed.variantId && variantRows.length === 1 && (!variantInput.value || options.force)) {
     selectVariant(variantRows[0].id);
-    applied.push("вариант");
+    applied.push(t("вариант", "variant"));
   } else if (variantRows.length > 1) {
     renderVariantDropdown("", true);
   }
 
   mappingParseStatus.textContent = applied.length
-    ? `Заполнено: ${applied.join(", ")}`
-    : "Не нашёл ID лота или вариант в этом тексте";
+    ? `${t("Заполнено", "Filled")}: ${applied.join(", ")}`
+    : t("Не нашёл ID лота или вариант в этом тексте", "Could not find lot ID or variant in this text");
   return applied.length > 0;
 }
 
@@ -1047,15 +1238,15 @@ function formatBytes(bytes) {
     return "";
   }
   const gb = value / 1024 / 1024 / 1024;
-  return `${gb >= 1 ? gb.toFixed(gb >= 10 ? 0 : 1) : "<1"} ГБ`;
+  return `${gb >= 1 ? gb.toFixed(gb >= 10 ? 0 : 1) : "<1"} ${t("ГБ", "GB")}`;
 }
 
 function tariffLabel(row) {
   const code = row.code || "";
   const family = (row.family_code || code.split("_")[0] || "tariff").toUpperCase();
-  const period = row.duration_days ? `${row.duration_days} дн` : (row.period_key ? `${row.period_key}` : "");
+  const period = row.duration_days ? `${row.duration_days} ${t("дн", "days")}` : (row.period_key ? `${row.period_key}` : "");
   const ip = row.ip_limit ? `${row.ip_limit} IP` : "";
-  const traffic = row.is_unlimited_traffic ? "безлимит" : formatBytes(row.included_traffic_bytes);
+  const traffic = row.is_unlimited_traffic ? t("безлимит", "unlimited") : formatBytes(row.included_traffic_bytes);
   const price = row.api_price_rub ? `${row.api_price_rub} ₽` : "";
   return [family, period, ip, traffic, price].filter(Boolean).join(" • ") + ` (${code})`;
 }
@@ -1066,7 +1257,7 @@ function renderTariffOptions(rows) {
   if (!tariffRows.length) {
     tariffDropdown.innerHTML = "";
     tariffDropdown.classList.add("hidden");
-    tariffHint.textContent = "Проверьте XyraNet API key и обновите страницу";
+    tariffHint.textContent = t("Проверьте XyraNet API key и обновите страницу", "Check the XyraNet API key and refresh the page");
     return;
   }
   const selected = findTariff(current);
@@ -1129,7 +1320,7 @@ function matchingTariffs(value) {
 function renderTariffDropdown(value = "", open = true) {
   const rows = matchingTariffs(value).slice(0, 20);
   if (!rows.length) {
-    tariffDropdown.innerHTML = `<div class="tariff-empty">Ничего не найдено</div>`;
+    tariffDropdown.innerHTML = `<div class="tariff-empty">${t("Ничего не найдено", "Nothing found")}</div>`;
   } else {
     tariffDropdown.innerHTML = rows.map((row) => `
       <button class="tariff-option" type="button" data-code="${escapeHtml(row.code)}">
@@ -1151,7 +1342,7 @@ function selectTariff(code) {
   updateTariffHint();
   const titleInput = productForm.elements.title;
   if (titleInput && !titleInput.value.trim()) {
-    titleInput.value = `${(selected.family_code || selected.code).toUpperCase()} ${selected.duration_days || ""} дн`.trim();
+    titleInput.value = `${(selected.family_code || selected.code).toUpperCase()} ${selected.duration_days || ""} ${selected.duration_days ? t("дн", "days") : ""}`.trim();
   }
 }
 
@@ -1159,12 +1350,12 @@ function updateTariffHint() {
   const selected = findTariff(tariffCode.value || tariffSearch.value);
   if (selected) {
     tariffCode.value = selected.code;
-    tariffHint.textContent = `Будет сохранён код: ${selected.code}`;
+    tariffHint.textContent = `${t("Будет сохранён код", "Code to be saved")}: ${selected.code}`;
     return;
   }
   tariffHint.textContent = tariffSearch.value.trim()
-    ? "Продолжайте ввод или выберите точный вариант из списка"
-    : "Начните вводить название, срок, цену или код тарифа";
+    ? t("Продолжайте ввод или выберите точный вариант из списка", "Keep typing or choose an exact option from the list")
+    : t("Начните вводить название, срок, цену или код тарифа", "Start typing a name, period, price, or tariff code");
 }
 
 function resetMappingForm() {
@@ -1174,8 +1365,8 @@ function resetMappingForm() {
   variantRows = [];
   tariffDropdown.classList.add("hidden");
   variantDropdown.classList.add("hidden");
-  mappingParseStatus.textContent = "Поля лота и варианта можно заполнить автоматически";
-  variantHint.textContent = "Если у лота есть кнопки, они появятся после парсинга";
+  mappingParseStatus.textContent = t("Поля лота и варианта можно заполнить автоматически", "Lot and variant fields can be filled automatically");
+  variantHint.textContent = t("Если у лота есть кнопки, они появятся после парсинга", "If the lot has buttons, they will appear after parsing");
   updateTariffHint();
   updateActionParamsVisibility({reset: true});
 }
@@ -1191,7 +1382,7 @@ function mappingPayloadFromForm() {
     try {
       payload.action_params = JSON.parse(paramsText);
     } catch (_) {
-      throw new Error("Не смог собрать параметры действия. Проверьте введённые числа.");
+      throw new Error(t("Не смог собрать параметры действия. Проверьте введённые числа.", "Could not build action parameters. Check the numbers you entered."));
     }
   } else {
     payload.action_params = {};
@@ -1201,7 +1392,7 @@ function mappingPayloadFromForm() {
 
 function renderSettings(rows) {
   settingsForm.innerHTML = rows.map((row) => {
-    const restart = row.restart_required ? "<small>нужен рестарт бота</small>" : "";
+    const restart = row.restart_required ? `<small>${t("нужен рестарт бота", "bot restart required")}</small>` : "";
     if (row.kind === "boolean") {
       const checked = row.value === "true" || row.value === true;
       return `
@@ -1224,25 +1415,25 @@ function renderSettings(rows) {
       `;
     }
     const type = row.sensitive ? "password" : "text";
-    const placeholder = row.sensitive && row.configured ? "задано, оставьте пустым чтобы не менять" : "";
+    const placeholder = row.sensitive && row.configured ? t("задано, оставьте пустым чтобы не менять", "set, leave empty to keep unchanged") : "";
     return `
       <label>${escapeHtml(row.label)} ${restart}
         <input name="${escapeHtml(row.key)}" type="${type}" value="${escapeHtml(row.value)}" placeholder="${escapeHtml(placeholder)}">
       </label>
     `;
-  }).join("") + `<button type="submit">Сохранить настройки</button>`;
+  }).join("") + `<button type="submit">${t("Сохранить настройки", "Save settings")}</button>`;
 }
 
 function renderBotUsers(rows) {
   botUsers.innerHTML = rows.map((row) => {
     const action = row.locked
-      ? "<span class=\"muted\">защищён</span>"
-      : `<button class="danger" data-user-delete="${row.telegram_id}" type="button">Удалить</button>`;
+      ? `<span class="muted">${t("защищён", "protected")}</span>`
+      : `<button class="danger" data-user-delete="${row.telegram_id}" type="button">${t("Удалить", "Delete")}</button>`;
     return `
       <tr>
         <td>${escapeHtml(row.telegram_id)}</td>
         <td>${escapeHtml(row.label || "")}</td>
-        <td><span class="pill ${row.source === "env" ? "" : "neutral"}">${row.source === "env" ? "env" : "панель"}</span></td>
+        <td><span class="pill ${row.source === "env" ? "" : "neutral"}">${row.source === "env" ? "env" : t("панель", "panel")}</span></td>
         <td>${action}</td>
       </tr>
     `;
@@ -1261,13 +1452,13 @@ function renderSales(rows) {
       <td>${escapeHtml(row.marketplace)}</td>
       <td>${escapeHtml(row.external_order_id)}</td>
       <td>${escapeHtml(row.external_product_id)}</td>
-      <td>${row.external_variant_id ? escapeHtml(row.external_variant_id) : "<span class=\"muted\">общий</span>"}</td>
-      <td>${escapeHtml(row.xyranet_order_id || "ожидает")}</td>
+      <td>${row.external_variant_id ? escapeHtml(row.external_variant_id) : `<span class="muted">${t("общий", "common")}</span>`}</td>
+      <td>${escapeHtml(row.xyranet_order_id || t("ожидает", "waiting"))}</td>
       <td>${escapeHtml(row.created_at)}</td>
       <td>
         <div class="row-actions">
-          <button class="secondary" data-event-sale="${row.marketplace}:${row.external_order_id}" type="button">История</button>
-          <button class="secondary" data-sale-resend="${row.id}" type="button" ${row.xyranet_order_id ? "" : "disabled"}>Повторить</button>
+          <button class="secondary" data-event-sale="${row.marketplace}:${row.external_order_id}" type="button">${t("История", "History")}</button>
+          <button class="secondary" data-sale-resend="${row.id}" type="button" ${row.xyranet_order_id ? "" : "disabled"}>${t("Повторить", "Resend")}</button>
         </div>
       </td>
     </tr>
@@ -1283,13 +1474,13 @@ function renderSales(rows) {
   });
   document.querySelectorAll("[data-sale-resend]").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("Повторно отправить сохранённую выдачу в чат площадки?")) {
+      if (!confirm(t("Повторно отправить сохранённую выдачу в чат площадки?", "Resend the saved delivery to the marketplace chat?"))) {
         return;
       }
       try {
         await api(`/admin/api/sales/${button.dataset.saleResend}/resend`, {method: "POST"});
         await loadOrderEvents();
-        alert("Выдача отправлена повторно.");
+        alert(t("Выдача отправлена повторно.", "Delivery was resent."));
       } catch (error) {
         alert(error.message || error);
       }
@@ -1305,20 +1496,20 @@ function renderPendingOperations(rows) {
       <td>${escapeHtml(row.marketplace)}:${escapeHtml(row.external_order_id)}</td>
       <td>${escapeHtml(actionLabel(row.action))}</td>
       <td><span class="pill ${row.status === "error" ? "off" : "neutral"}">${escapeHtml(row.status)}</span></td>
-      <td>${row.target_order_id ? `<code>${escapeHtml(row.target_order_id)}</code>` : "<span class=\"muted\">ждём</span>"}</td>
+      <td>${row.target_order_id ? `<code>${escapeHtml(row.target_order_id)}</code>` : `<span class="muted">${t("ждём", "waiting")}</span>`}</td>
       <td>${escapeHtml(row.error_text || "")}</td>
       <td>
         <div class="row-actions">
-          <button class="secondary" data-pending-complete="${row.id}" type="button">Завершить</button>
+          <button class="secondary" data-pending-complete="${row.id}" type="button">${t("Завершить", "Complete")}</button>
           <button class="secondary" data-pending-retry="${row.id}" type="button" ${row.status === "error" ? "" : "disabled"}>Retry</button>
-          <button class="secondary" data-pending-events="${row.marketplace}:${row.external_order_id}" type="button">История</button>
+          <button class="secondary" data-pending-events="${row.marketplace}:${row.external_order_id}" type="button">${t("История", "History")}</button>
         </div>
       </td>
     </tr>
-  `).join("") || `<tr><td colspan="7"><span class="muted">Нет операций</span></td></tr>`;
+  `).join("") || `<tr><td colspan="7"><span class="muted">${t("Нет операций", "No operations")}</span></td></tr>`;
   document.querySelectorAll("[data-pending-complete]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const orderId = prompt("Введите ID заказа XyraNet для применения услуги");
+      const orderId = prompt(t("Введите ID заказа XyraNet для применения услуги", "Enter the XyraNet order ID to apply the service"));
       if (!orderId) {
         return;
       }
@@ -1362,7 +1553,7 @@ function renderOrderEvents(rows) {
       <td><span class="pill ${row.status === "error" ? "off" : "neutral"}">${escapeHtml(row.status)}</span></td>
       <td>${escapeHtml(row.message || "")}</td>
     </tr>
-  `).join("") || `<tr><td colspan="5"><span class="muted">История пока пустая</span></td></tr>`;
+  `).join("") || `<tr><td colspan="5"><span class="muted">${t("История пока пустая", "History is empty")}</span></td></tr>`;
 }
 
 async function loadPendingOperations() {
@@ -1411,6 +1602,10 @@ async function loadAll() {
       summary = null;
     }
     productRows = Array.isArray(productsRows) ? productsRows : [];
+    const languageSetting = (Array.isArray(settingsRows) ? settingsRows : []).find((row) => row.key === "panel_language");
+    if (languageSetting?.value) {
+      setLanguage(languageSetting.value);
+    }
     renderMetrics(status, summary, systemConfig);
     renderSystemMetrics(systemConfig);
     renderProducts();
@@ -1426,7 +1621,7 @@ async function loadAll() {
     hideLogin();
   } catch (error) {
     showLogin();
-    loginError.textContent = "Сессия не активна или логин/пароль неверные.";
+    loginError.textContent = t("Сессия не активна или логин/пароль неверные.", "Session is inactive or login/password is incorrect.");
   }
 }
 
@@ -1449,7 +1644,7 @@ loginForm.addEventListener("submit", async (event) => {
     loginForm.reset();
     await loadAll();
   } catch (_) {
-    loginError.textContent = "Не получилось войти. Проверь логин и пароль.";
+    loginError.textContent = t("Не получилось войти. Проверь логин и пароль.", "Could not sign in. Check login and password.");
   }
 });
 
@@ -1478,7 +1673,7 @@ document.querySelectorAll("[data-smoke-test]").forEach((button) => {
   button.addEventListener("click", async () => {
     const name = button.dataset.smokeTest;
     button.disabled = true;
-    smokeTestStatus.textContent = "Проверяю...";
+    smokeTestStatus.textContent = t("Проверяю...", "Checking...");
     try {
       const result = await api(`/admin/api/smoke-tests/${name}`, {method: "POST"});
       smokeTestStatus.textContent = `${name}: ${result.status} — ${result.detail || ""}`;
@@ -1544,7 +1739,7 @@ parseMappingButton.addEventListener("click", async () => {
       renderVariantDropdown("", true);
     }
   } catch (error) {
-    mappingParseStatus.textContent = `Не смог загрузить кнопки: ${error.message || error}`;
+    mappingParseStatus.textContent = `${t("Не смог загрузить кнопки", "Could not load buttons")}: ${error.message || error}`;
   } finally {
     parseMappingButton.disabled = false;
   }
@@ -1561,7 +1756,7 @@ mappingSource.addEventListener("paste", () => {
         renderVariantDropdown("", true);
       }
     } catch (error) {
-      mappingParseStatus.textContent = `Не смог загрузить кнопки: ${error.message || error}`;
+      mappingParseStatus.textContent = `${t("Не смог загрузить кнопки", "Could not load buttons")}: ${error.message || error}`;
     }
   }, 0);
 });
@@ -1689,7 +1884,7 @@ complexVariableButtons.addEventListener("click", (event) => {
 saveComplexVariableButton.addEventListener("click", async () => {
   const key = complexVariableKey.value.trim();
   if (!key) {
-    alert("Укажите имя переменной.");
+    alert(t("Укажите имя переменной.", "Enter a variable name."));
     complexVariableKey.focus();
     return;
   }
@@ -1718,7 +1913,7 @@ deleteComplexVariableButton.addEventListener("click", async () => {
   if (!variable || variable.builtin) {
     return;
   }
-  if (!confirm(`Удалить переменную ${variable.token}?`)) {
+  if (!confirm(`${t("Удалить переменную", "Delete variable")} ${variable.token}?`)) {
     return;
   }
   await api(`/admin/api/complex-variables/${encodeURIComponent(variable.key)}`, {method: "DELETE"});
@@ -1731,7 +1926,7 @@ productForm.addEventListener("submit", async (event) => {
   const action = productForm.elements.action.value;
   const needsTariff = ["create", "renew"].includes(action);
   if (needsTariff && !resolveTariffCode()) {
-    alert("Выберите тариф из подсказок или введите точный код тарифа.");
+    alert(t("Выберите тариф из подсказок или введите точный код тарифа.", "Choose a tariff from suggestions or enter the exact tariff code."));
     return;
   }
   if (!needsTariff && !tariffCode.value) {
@@ -1754,11 +1949,11 @@ productForm.addEventListener("submit", async (event) => {
     setMappingEditMode(null);
   }
   mappingParseStatus.textContent = wasEditing
-    ? "Правки сохранены. Можно выбрать следующую кнопку этого лота."
-    : "Маппинг сохранён. Можно выбрать следующую кнопку этого лота.";
+    ? t("Правки сохранены. Можно выбрать следующую кнопку этого лота.", "Changes saved. You can choose the next button for this lot.")
+    : t("Маппинг сохранён. Можно выбрать следующую кнопку этого лота.", "Mapping saved. You can choose the next button for this lot.");
   await loadAll();
   if (variantRows.length > 1) {
-    variantHint.textContent = `Доступно кнопок: ${availableVariantRows("").length} из ${variantRows.length}`;
+    variantHint.textContent = `${t("Доступно кнопок", "Available buttons")}: ${availableVariantRows("").length} ${t("из", "of")} ${variantRows.length}`;
     variantSearch.focus();
     renderVariantDropdown("", true);
   }
@@ -1783,7 +1978,7 @@ tariffSearch.addEventListener("change", () => {
   }
   const selected = tariffRows.find((row) => row.code === selectedCode);
   if (selected) {
-    titleInput.value = `${(selected.family_code || selected.code).toUpperCase()} ${selected.duration_days || ""} дн`.trim();
+    titleInput.value = `${(selected.family_code || selected.code).toUpperCase()} ${selected.duration_days || ""} ${selected.duration_days ? t("дн", "days") : ""}`.trim();
   }
 });
 
@@ -1831,16 +2026,16 @@ settingsForm.addEventListener("submit", async (event) => {
 
 restartTelegramButton.addEventListener("click", async () => {
   restartTelegramButton.disabled = true;
-  telegramRestartStatus.textContent = "Перезапускаю Telegram-бота...";
+  telegramRestartStatus.textContent = t("Перезапускаю Telegram-бота...", "Restarting Telegram bot...");
   try {
     const result = await api("/admin/api/telegram/restart", {method: "POST"});
     const telegram = result.telegram || {};
     telegramRestartStatus.textContent = telegram.running
-      ? "Telegram-бот запущен с актуальными настройками."
-      : `Telegram-бот не запущен: ${telegram.reason || "проверьте токен, доступы и включение Telegram"}.`;
+      ? t("Telegram-бот запущен с актуальными настройками.", "Telegram bot is running with current settings.")
+      : `${t("Telegram-бот не запущен", "Telegram bot is not running")}: ${telegram.reason || t("проверьте токен, доступы и включение Telegram", "check token, access, and Telegram enabled")}.`;
     await loadAll();
   } catch (error) {
-    telegramRestartStatus.textContent = `Не удалось перезапустить Telegram-бота: ${error.message}`;
+    telegramRestartStatus.textContent = `${t("Не удалось перезапустить Telegram-бота", "Could not restart Telegram bot")}: ${error.message}`;
   } finally {
     restartTelegramButton.disabled = false;
   }
