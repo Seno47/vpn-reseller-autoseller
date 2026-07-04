@@ -212,26 +212,24 @@ sudo bash scripts/install-linux.sh
 Откройте PowerShell в папке проекта:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-notepad .env
-python run.py
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+.\.venv\Scripts\python.exe run.py
 ```
 
-В `.env` заполните минимум:
+Установщик спросит:
 
 - `ADMIN_IDS`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
-- `ADMIN_TOKEN`
+- язык интерфейса `ru/en`
 - `XYRANET_API_KEY`, если сразу проверяете XyraNet
 - `TELEGRAM_BOT_TOKEN`, если нужен Telegram-бот
 - `DIGISELLER_SELLER_ID` и `DIGISELLER_API_KEY`, если проверяете Digiseller
 - `GGSEL_SELLER_ID` и `GGSEL_API_KEY`, если проверяете GGsel
 
-`ADMIN_PASSWORD` должен быть не короче 8 символов. `ADMIN_TOKEN` должен быть случайной строкой минимум 24 символа. Если оставить значения из примера, веб-панель не пустит в админку.
+`ADMIN_TOKEN` генерируется автоматически и сохраняется в `.env`. Это внутренний токен сессии панели, вводить его при входе не нужно.
+
+Если вы создаёте `.env` вручную, не оставляйте `ADMIN_TOKEN` из примера. Он должен быть случайной строкой минимум 24 символа, иначе веб-панель не пустит в админку.
 
 После запуска откройте:
 
