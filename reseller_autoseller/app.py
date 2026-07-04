@@ -48,6 +48,7 @@ from reseller_autoseller.services import (
     parse_chat_command,
 )
 from reseller_autoseller.statistics import build_sales_statistics
+from reseller_autoseller.system_metrics import collect_system_metrics
 from reseller_autoseller.telegram_bot import run_bot
 from reseller_autoseller.xyra_client import XyraNetApiError
 
@@ -945,6 +946,10 @@ def create_app() -> FastAPI:
             "telegram_running": telegram_status()["running"],
             "bot_admins": len(runtime.bot_admin_ids()),
         }
+
+    @app.get("/admin/api/system", dependencies=[Depends(require_admin)])
+    async def admin_system_metrics() -> dict[str, Any]:
+        return collect_system_metrics(settings.database_file.parent)
 
     @app.get("/admin/api/summary", dependencies=[Depends(require_admin)])
     async def admin_summary() -> Any:

@@ -32,6 +32,7 @@ from reseller_autoseller.services import (
     delivery_template_key,
 )
 from reseller_autoseller.statistics import STATS_PERIODS, build_sales_statistics
+from reseller_autoseller.system_metrics import collect_system_metrics
 from reseller_autoseller.xyra_client import XyraNetClient
 
 
@@ -56,6 +57,9 @@ def main_menu(is_owner: bool) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
             InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance"),
+        ],
+        [
+            InlineKeyboardButton(text="🖥 Сервер", callback_data="menu:system"),
         ],
         [
             InlineKeyboardButton(text="🧾 Товары", callback_data="menu:products"),
@@ -265,6 +269,52 @@ def statistics_text(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def percent_text(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def mb_text(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if number >= 1024:
+        return f"{number / 1024:.1f} GB"
+    return f"{number:.0f} MB"
+
+
+def system_metrics_text(data: dict[str, Any]) -> str:
+    load_average = data.get("cpu", {}).get("load_average")
+    load_text = " / ".join(f"{float(item):.2f}" for item in load_average) if load_average else "n/a"
+    memory = data.get("memory", {})
+    disk = data.get("disk", {})
+    process = data.get("process", {})
+    return "\n".join(
+        [
+            "🖥 <b>Сервер</b>",
+            f"Host: <code>{escape(str(data.get('hostname') or 'n/a'))}</code>",
+            f"OS: <code>{escape(str(data.get('platform') or 'n/a'))}</code>",
+            f"Python: <code>{escape(str(data.get('python') or 'n/a'))}</code>",
+            "",
+            f"CPU: <b>{percent_text(data.get('cpu', {}).get('percent'))}</b> · ядер {escape(str(data.get('cpu', {}).get('cores') or 'n/a'))}",
+            f"Load avg: <code>{escape(load_text)}</code>",
+            f"RAM: <b>{percent_text(memory.get('percent'))}</b> · {mb_text(memory.get('used_mb'))} / {mb_text(memory.get('total_mb'))}",
+            f"Swap: {mb_text(memory.get('swap_used_mb'))} / {mb_text(memory.get('swap_total_mb'))}",
+            f"Диск: <b>{percent_text(disk.get('percent'))}</b> · свободно {mb_text(disk.get('free_mb'))}",
+            "",
+            f"Процесс: PID <code>{escape(str(process.get('pid') or 'n/a'))}</code> · RAM {mb_text(process.get('rss_mb'))} · CPU {percent_text(process.get('cpu_percent'))}",
+            f"Аптайм: сервер <b>{escape(str(data.get('uptime') or 'n/a'))}</b> · приложение <b>{escape(str(process.get('uptime') or 'n/a'))}</b>",
+        ]
+    )
+
+
 def parse_user_payload(text: str) -> tuple[int, str]:
     parts = text.strip().split(maxsplit=1)
     if not parts or not parts[0].isdigit():
@@ -346,6 +396,14 @@ def build_dispatcher(
             f"👥 Telegram-админов: <b>{len(runtime.bot_admin_ids())}</b>",
             back_menu(),
         )
+
+    @router.callback_query(F.data == "menu:system")
+    async def system_status(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await answer_or_edit(callback, system_metrics_text(collect_system_metrics()), back_menu())
 
     @router.callback_query(F.data == "menu:balance")
     async def balance(callback: CallbackQuery) -> None:

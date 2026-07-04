@@ -74,6 +74,25 @@ class AdminSecurityTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 429)
 
+    def test_system_metrics_endpoint_returns_server_load(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            token = login.json()["token"]
+
+            response = client.get("/admin/api/system", headers={"Authorization": f"Bearer {token}"})
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertIn("cpu", data)
+            self.assertIn("memory", data)
+            self.assertIn("disk", data)
+            self.assertIn("process", data)
+            self.assertGreaterEqual(data["cpu"]["cores"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

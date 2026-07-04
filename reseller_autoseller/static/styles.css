@@ -133,7 +133,7 @@ p {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -225,6 +225,38 @@ p {
 .stat-card small {
   display: block;
   margin-top: 4px;
+}
+
+.system-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.system-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.system-card span {
+  color: var(--muted);
+  display: block;
+  font-size: 13px;
+}
+
+.system-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 20px;
+}
+
+.system-card small {
+  display: block;
+  margin-top: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .period-field {

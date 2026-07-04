@@ -62,6 +62,8 @@ const eventOrderFilter = document.querySelector("#eventOrderFilter");
 const refreshEventsButton = document.querySelector("#refreshEventsButton");
 const smokeTestStatus = document.querySelector("#smokeTestStatus");
 const backupDatabaseButton = document.querySelector("#backupDatabaseButton");
+const systemMetrics = document.querySelector("#systemMetrics");
+const refreshSystemButton = document.querySelector("#refreshSystemButton");
 const actionParamsField = document.querySelector("#actionParamsField");
 const actionParamsTitle = document.querySelector("#actionParamsTitle");
 const actionParamAmountField = document.querySelector("#actionParamAmountField");
@@ -465,15 +467,66 @@ function logout() {
   showLogin();
 }
 
-function renderMetrics(status, summary) {
+function percentText(value) {
+  return value === null || value === undefined ? "n/a" : `${Number(value).toFixed(1)}%`;
+}
+
+function mbText(value) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+  const number = Number(value);
+  if (number >= 1024) {
+    return `${(number / 1024).toFixed(number >= 10240 ? 0 : 1)} GB`;
+  }
+  return `${number.toFixed(number >= 100 ? 0 : 1)} MB`;
+}
+
+function renderMetrics(status, summary, system = null) {
   const balance = summary && summary.balance ? `${summary.balance} ${summary.currency || "RUB"}` : "n/a";
   const telegram = status.telegram_running ? "ON" : "OFF";
+  const cpu = system?.cpu?.percent;
+  const memory = system?.memory?.percent;
+  const disk = system?.disk?.percent;
   metrics.innerHTML = `
     <article class="metric"><span>Маппингов</span><strong>${status.products}</strong></article>
     <article class="metric"><span>Продаж</span><strong>${status.sales}</strong></article>
     <article class="metric"><span>Telegram</span><strong>${telegram}</strong><small>${status.bot_admins || 0} admin</small></article>
     <article class="metric"><span>Баланс</span><strong>${escapeHtml(balance)}</strong></article>
+    <article class="metric"><span>CPU</span><strong>${escapeHtml(percentText(cpu))}</strong><small>${system?.cpu?.cores || "n/a"} ядер</small></article>
+    <article class="metric"><span>RAM</span><strong>${escapeHtml(percentText(memory))}</strong><small>${escapeHtml(mbText(system?.memory?.used_mb))} / ${escapeHtml(mbText(system?.memory?.total_mb))}</small></article>
+    <article class="metric"><span>Диск</span><strong>${escapeHtml(percentText(disk))}</strong><small>${escapeHtml(mbText(system?.disk?.free_mb))} свободно</small></article>
   `;
+}
+
+function renderSystemMetrics(system) {
+  if (!systemMetrics) {
+    return;
+  }
+  if (!system) {
+    systemMetrics.innerHTML = `<p class="notice">Метрики сервера пока недоступны.</p>`;
+    return;
+  }
+  const loadAverage = Array.isArray(system.cpu?.load_average)
+    ? system.cpu.load_average.map((item) => Number(item).toFixed(2)).join(" / ")
+    : "n/a";
+  const rows = [
+    ["CPU", percentText(system.cpu?.percent), `${system.cpu?.cores || "n/a"} ядер · load ${loadAverage}`],
+    ["RAM", percentText(system.memory?.percent), `${mbText(system.memory?.used_mb)} / ${mbText(system.memory?.total_mb)} · свободно ${mbText(system.memory?.available_mb)}`],
+    ["Swap", `${mbText(system.memory?.swap_used_mb)}`, `total ${mbText(system.memory?.swap_total_mb)}`],
+    ["Диск", percentText(system.disk?.percent), `${mbText(system.disk?.used_mb)} / ${mbText(system.disk?.total_mb)} · свободно ${mbText(system.disk?.free_mb)}`],
+    ["Процесс", `${mbText(system.process?.rss_mb)}`, `CPU ${percentText(system.process?.cpu_percent)} · PID ${system.process?.pid || "n/a"}`],
+    ["Аптайм", system.uptime || "n/a", `приложение ${system.process?.uptime || "n/a"}`],
+    ["Хост", system.hostname || "n/a", system.platform || "n/a"],
+    ["Python", system.python || "n/a", system.machine || ""],
+  ];
+  systemMetrics.innerHTML = rows.map(([label, value, detail]) => `
+    <article class="system-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </article>
+  `).join("");
 }
 
 function moneyText(value, currency = "₽") {
@@ -1325,8 +1378,9 @@ async function loadAll() {
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
     const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
-    const [status, productsRows, salesRows, settingsRows, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
+    const [status, systemConfig, productsRows, salesRows, settingsRows, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
       api("/admin/api/status"),
+      api("/admin/api/system").catch(() => null),
       api("/admin/api/products"),
       api("/admin/api/sales"),
       api("/admin/api/settings"),
@@ -1345,7 +1399,8 @@ async function loadAll() {
       summary = null;
     }
     productRows = Array.isArray(productsRows) ? productsRows : [];
-    renderMetrics(status, summary);
+    renderMetrics(status, summary, systemConfig);
+    renderSystemMetrics(systemConfig);
     renderProducts();
     renderSales(salesRows);
     renderSettings(settingsRows);
@@ -1440,6 +1495,23 @@ backupDatabaseButton.addEventListener("click", async () => {
     URL.revokeObjectURL(url);
   } catch (error) {
     alert(error.message || error);
+  }
+});
+
+refreshSystemButton?.addEventListener("click", async () => {
+  try {
+    const systemConfig = await api("/admin/api/system");
+    renderSystemMetrics(systemConfig);
+    const status = await api("/admin/api/status");
+    let summary = null;
+    try {
+      summary = await api("/admin/api/summary");
+    } catch (_) {
+      summary = null;
+    }
+    renderMetrics(status, summary, systemConfig);
+  } catch (error) {
+    renderSystemMetrics(null);
   }
 });
 

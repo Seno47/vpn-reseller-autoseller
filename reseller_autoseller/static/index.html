@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>XyraNet Reseller</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260704-3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260704-4">
 </head>
 <body>
   <section class="login-screen" id="loginScreen">
@@ -329,6 +329,16 @@
 
       <section class="panel">
         <div class="panel-head">
+          <h2>Нагрузка сервера</h2>
+          <div class="panel-actions">
+            <button class="secondary" id="refreshSystemButton" type="button">Обновить</button>
+          </div>
+        </div>
+        <div class="system-grid" id="systemMetrics"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
           <h2>Pending-операции</h2>
           <label class="period-field">Статус
             <select id="pendingStatusFilter">
@@ -365,6 +375,6 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=20260704-3"></script>
+  <script src="/static/app.js?v=20260704-4"></script>
 </body>
 </html>
