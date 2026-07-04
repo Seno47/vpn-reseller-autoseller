@@ -283,6 +283,7 @@ http://127.0.0.1:8095
 Откройте `Настройки` и заполните:
 
 - `XyraNet API URL` - оставьте `https://xyranet.pro/api/wholesale`;
+- `Язык интерфейса` - выберите русский или английский язык для подписей настроек;
 - `XyraNet API key` - ключ из личного кабинета XyraNet;
 - `Digiseller seller ID` и `Digiseller API key` - если используете Plati.Market/Digiseller;
 - `GGsel seller ID` и `GGsel API key` - если используете GGsel;

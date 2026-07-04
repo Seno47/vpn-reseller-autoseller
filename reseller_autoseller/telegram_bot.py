@@ -56,17 +56,15 @@ def main_menu(is_owner: bool) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
-            InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance"),
+            InlineKeyboardButton(text="🖥 Метрики", callback_data="menu:system"),
         ],
         [
-            InlineKeyboardButton(text="🖥 Сервер", callback_data="menu:system"),
+            InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance"),
+            InlineKeyboardButton(text="📈 Статистика", callback_data="stats:period:30d"),
         ],
         [
             InlineKeyboardButton(text="🧾 Товары", callback_data="menu:products"),
             InlineKeyboardButton(text="📦 Продажи", callback_data="menu:sales"),
-        ],
-        [
-            InlineKeyboardButton(text="📈 Статистика", callback_data="stats:period:30d"),
         ],
         [
             InlineKeyboardButton(text="🧭 Тарифы", callback_data="menu:tariffs"),
@@ -110,14 +108,16 @@ def format_tariff_label(row: dict[str, Any]) -> str:
 
 
 SETTING_GROUPS = [
-    ("🔌 XyraNet", ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
-    ("🛒 Маркетплейсы", ["digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
-    ("🤖 Telegram", ["enable_telegram", "telegram_bot_token"]),
-    ("🔔 Уведомления", ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
-    ("🛡 Веб-панель", ["app_base_url", "admin_username", "admin_password"]),
+    ({"ru": "🌐 Интерфейс", "en": "🌐 Interface"}, ["panel_language"]),
+    ({"ru": "🔌 XyraNet", "en": "🔌 XyraNet"}, ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
+    ({"ru": "🛒 Маркетплейсы", "en": "🛒 Marketplaces"}, ["digiseller_seller_id", "digiseller_api_key", "ggsel_seller_id", "ggsel_api_key"]),
+    ({"ru": "🤖 Telegram", "en": "🤖 Telegram"}, ["enable_telegram", "telegram_bot_token"]),
+    ({"ru": "🔔 Уведомления", "en": "🔔 Notifications"}, ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
+    ({"ru": "🛡 Веб-панель", "en": "🛡 Web panel"}, ["app_base_url", "admin_username", "admin_password"]),
 ]
 
 SETTING_ICONS = {
+    "panel_language": "🌐",
     "app_base_url": "🌐",
     "xyranet_api_base_url": "🔗",
     "xyranet_api_key": "🔑",
@@ -145,11 +145,24 @@ def setting_button_label(item: dict[str, Any]) -> str:
 
 
 def setting_value_label(runtime: RuntimeConfig, item: dict[str, Any]) -> str:
+    language = runtime.language()
     if item["sensitive"]:
+        if language == "en":
+            return "set" if item["configured"] else "empty"
         return "задано" if item["configured"] else "пусто"
     if item["kind"] == "boolean":
+        if language == "en":
+            return "on" if runtime.get_bool(item["key"]) else "off"
         return "вкл" if runtime.get_bool(item["key"]) else "выкл"
+    if item["kind"] == "select":
+        for option in item.get("options") or []:
+            if str(option.get("value")) == str(item.get("value")):
+                return str(option.get("label"))
     return str(item["value"])
+
+
+def setting_group_title(labels: dict[str, str], language: str) -> str:
+    return labels.get(language) or labels.get("en") or next(iter(labels.values()))
 
 
 def parse_mapping_payload(text: str) -> dict[str, str]:
@@ -739,8 +752,9 @@ def build_dispatcher(
         lines = ["⚙️ <b>Настройки</b>"]
         buttons = []
         settings_by_key = {item["key"]: item for item in runtime.setting_payload()}
-        for group_title, keys in SETTING_GROUPS:
-            lines.append(f"\n<b>{escape(group_title)}</b>")
+        language = runtime.language()
+        for group_labels, keys in SETTING_GROUPS:
+            lines.append(f"\n<b>{escape(setting_group_title(group_labels, language))}</b>")
             group_buttons: list[InlineKeyboardButton] = []
             for key in keys:
                 item = settings_by_key.get(key)
@@ -793,14 +807,40 @@ def build_dispatcher(
             return
         key = (callback.data or "").removeprefix("setting:edit:")
         definition = SETTING_BY_KEY[key]
+        item = next((row for row in runtime.setting_payload() if row["key"] == key), None)
         if definition.kind == "boolean":
             runtime.set_value(key, not runtime.get_bool(key))
             await callback.answer("✅ Переключено")
             await settings_menu(callback)
             return
+        if definition.kind == "select":
+            options = [
+                [InlineKeyboardButton(text=str(option["label"]), callback_data=f"setting:select:{key}:{option['value']}")]
+                for option in (item or {}).get("options", [])
+            ]
+            options.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")])
+            label = str((item or {}).get("label") or definition.label)
+            await answer_or_edit(callback, f"🌐 <b>{escape(label)}</b>\nВыберите значение:", InlineKeyboardMarkup(inline_keyboard=options))
+            return
         await state.set_state(SettingState.waiting_value)
         await state.update_data(setting_key=key)
-        await answer_or_edit(callback, f"✏️ Отправьте новое значение для <b>{escape(definition.label)}</b>.", back_menu())
+        label = str((item or {}).get("label") or definition.label)
+        await answer_or_edit(callback, f"✏️ Отправьте новое значение для <b>{escape(label)}</b>.", back_menu())
+
+    @router.callback_query(F.data.startswith("setting:select:"))
+    async def setting_select(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_owner(uid):
+            await deny_callback(callback)
+            return
+        _, _, key, value = (callback.data or "").split(":", 3)
+        try:
+            runtime.set_value(key, value)
+        except ValueError as exc:
+            await callback.answer(f"⚠️ {str(exc)}", show_alert=True)
+            return
+        await callback.answer("✅ Сохранено")
+        await settings_menu(callback)
 
     @router.message(SettingState.waiting_value)
     async def setting_value(message: Message, state: FSMContext) -> None:

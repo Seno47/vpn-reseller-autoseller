@@ -9,6 +9,16 @@ from reseller_autoseller.xyra_client import XyraNetClient
 
 
 @dataclass(frozen=True)
+class SettingOption:
+    value: str
+    label_en: str
+    label_ru: str
+
+    def label_for(self, language: str) -> str:
+        return self.label_ru if language == "ru" else self.label_en
+
+
+@dataclass(frozen=True)
 class SettingDefinition:
     key: str
     label: str
@@ -16,27 +26,46 @@ class SettingDefinition:
     sensitive: bool = False
     restart_required: bool = False
     description: str = ""
+    label_ru: str = ""
+    description_ru: str = ""
+    options: tuple[SettingOption, ...] = ()
+
+    def label_for(self, language: str) -> str:
+        return self.label_ru if language == "ru" and self.label_ru else self.label
+
+    def description_for(self, language: str) -> str:
+        return self.description_ru if language == "ru" and self.description_ru else self.description
 
 
 SETTING_DEFINITIONS = [
-    SettingDefinition("app_base_url", "Base URL"),
-    SettingDefinition("xyranet_api_base_url", "XyraNet API URL"),
-    SettingDefinition("xyranet_api_key", "XyraNet API key", sensitive=True),
-    SettingDefinition("xyranet_timeout_seconds", "XyraNet timeout", kind="number"),
-    SettingDefinition("digiseller_seller_id", "Digiseller seller ID"),
-    SettingDefinition("digiseller_api_key", "Digiseller API key", sensitive=True),
-    SettingDefinition("ggsel_seller_id", "GGsel seller ID"),
-    SettingDefinition("ggsel_api_key", "GGsel API key", sensitive=True),
-    SettingDefinition("enable_telegram", "Telegram enabled", kind="boolean", restart_required=True),
-    SettingDefinition("telegram_bot_token", "Telegram bot token", sensitive=True, restart_required=True),
-    SettingDefinition("notify_new_purchases", "Notify: new purchases", kind="boolean"),
-    SettingDefinition("notify_chat_messages", "Notify: chat messages", kind="boolean"),
-    SettingDefinition("notify_errors", "Notify: errors", kind="boolean"),
-    SettingDefinition("notify_pending", "Notify: pending actions", kind="boolean"),
-    SettingDefinition("notify_daily_statistics", "Notify: daily statistics", kind="boolean"),
-    SettingDefinition("free_reissue_enabled", "Free reissue command", kind="boolean"),
-    SettingDefinition("admin_username", "Web admin username"),
-    SettingDefinition("admin_password", "Web admin password", sensitive=True),
+    SettingDefinition(
+        "panel_language",
+        "Interface language",
+        kind="select",
+        label_ru="Язык интерфейса",
+        options=(
+            SettingOption("ru", "Russian", "Русский"),
+            SettingOption("en", "English", "Английский"),
+        ),
+    ),
+    SettingDefinition("app_base_url", "Base URL", label_ru="Базовый URL панели"),
+    SettingDefinition("xyranet_api_base_url", "XyraNet API URL", label_ru="XyraNet API URL"),
+    SettingDefinition("xyranet_api_key", "XyraNet API key", sensitive=True, label_ru="XyraNet API key"),
+    SettingDefinition("xyranet_timeout_seconds", "XyraNet timeout", kind="number", label_ru="Таймаут XyraNet"),
+    SettingDefinition("digiseller_seller_id", "Digiseller seller ID", label_ru="Digiseller seller ID"),
+    SettingDefinition("digiseller_api_key", "Digiseller API key", sensitive=True, label_ru="Digiseller API key"),
+    SettingDefinition("ggsel_seller_id", "GGsel seller ID", label_ru="GGsel seller ID"),
+    SettingDefinition("ggsel_api_key", "GGsel API key", sensitive=True, label_ru="GGsel API key"),
+    SettingDefinition("enable_telegram", "Telegram enabled", kind="boolean", restart_required=True, label_ru="Telegram включён"),
+    SettingDefinition("telegram_bot_token", "Telegram bot token", sensitive=True, restart_required=True, label_ru="Токен Telegram-бота"),
+    SettingDefinition("notify_new_purchases", "Notify: new purchases", kind="boolean", label_ru="Уведомлять о новых покупках"),
+    SettingDefinition("notify_chat_messages", "Notify: chat messages", kind="boolean", label_ru="Уведомлять о сообщениях в чатах"),
+    SettingDefinition("notify_errors", "Notify: errors", kind="boolean", label_ru="Уведомлять об ошибках"),
+    SettingDefinition("notify_pending", "Notify: pending actions", kind="boolean", label_ru="Уведомлять об ожидающих действиях"),
+    SettingDefinition("notify_daily_statistics", "Notify: daily statistics", kind="boolean", label_ru="Ежедневная статистика"),
+    SettingDefinition("free_reissue_enabled", "Free reissue command", kind="boolean", label_ru="Бесплатный перевыпуск по команде"),
+    SettingDefinition("admin_username", "Web admin username", label_ru="Логин веб-панели"),
+    SettingDefinition("admin_password", "Web admin password", sensitive=True, label_ru="Пароль веб-панели"),
 ]
 
 SETTING_BY_KEY = {item.key: item for item in SETTING_DEFINITIONS}
@@ -58,6 +87,9 @@ class RuntimeConfig:
 
     def get_text(self, key: str) -> str:
         return self.get_raw(key).strip()
+
+    def language(self) -> str:
+        return "en" if self.get_text("panel_language").lower().startswith("en") else "ru"
 
     def get_bool(self, key: str) -> bool:
         return self.get_raw(key).strip().lower() in {"1", "true", "yes", "on"}
@@ -107,20 +139,25 @@ class RuntimeConfig:
     def setting_payload(self) -> list[dict[str, Any]]:
         result = []
         stored = self.db.list_settings()
+        language = self.language()
         for definition in SETTING_DEFINITIONS:
             value = self.get_raw(definition.key)
             has_value = bool(value)
             result.append(
                 {
                     "key": definition.key,
-                    "label": definition.label,
+                    "label": definition.label_for(language),
                     "kind": definition.kind,
                     "value": "" if definition.sensitive else value,
                     "configured": has_value,
                     "source": "database" if definition.key in stored else "env",
                     "sensitive": definition.sensitive,
                     "restart_required": definition.restart_required,
-                    "description": definition.description,
+                    "description": definition.description_for(language),
+                    "options": [
+                        {"value": option.value, "label": option.label_for(language)}
+                        for option in definition.options
+                    ],
                 }
             )
         return result
@@ -135,6 +172,11 @@ class RuntimeConfig:
             stored = "true" if self._as_bool(value) else "false"
         elif definition.kind == "number":
             stored = str(float(value))
+        elif definition.kind == "select":
+            stored = str(value).strip().lower()
+            allowed = {option.value for option in definition.options}
+            if stored not in allowed:
+                raise ValueError(f"Unsupported value for {key}: {value}")
         else:
             stored = str(value).strip()
         if key == "xyranet_api_base_url":

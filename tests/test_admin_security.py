@@ -93,6 +93,30 @@ class AdminSecurityTests(unittest.TestCase):
             self.assertIn("process", data)
             self.assertGreaterEqual(data["cpu"]["cores"], 1)
 
+    def test_settings_can_switch_between_russian_and_english_labels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            ru_response = client.get("/admin/api/settings", headers=headers)
+            ru_labels = {item["key"]: item["label"] for item in ru_response.json()}
+            self.assertEqual(ru_labels["panel_language"], "Язык интерфейса")
+            self.assertEqual(ru_labels["enable_telegram"], "Telegram включён")
+
+            en_response = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"panel_language": "en"}},
+            )
+            en_labels = {item["key"]: item["label"] for item in en_response.json()["settings"]}
+
+            self.assertEqual(en_labels["panel_language"], "Interface language")
+            self.assertEqual(en_labels["enable_telegram"], "Telegram enabled")
+
 
 if __name__ == "__main__":
     unittest.main()

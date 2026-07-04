@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     admin_token: str = "change-me"
 
     database_path: str = "data/reseller.sqlite3"
+    panel_language: str = "ru"
     enable_telegram: bool = True
     notify_new_purchases: bool = True
     notify_chat_messages: bool = True

@@ -1211,6 +1211,18 @@ function renderSettings(rows) {
         </label>
       `;
     }
+    if (row.kind === "select") {
+      const options = Array.isArray(row.options) ? row.options : [];
+      return `
+        <label>${escapeHtml(row.label)} ${restart}
+          <select name="${escapeHtml(row.key)}">
+            ${options.map((option) => `
+              <option value="${escapeHtml(option.value)}" ${String(row.value) === String(option.value) ? "selected" : ""}>${escapeHtml(option.label)}</option>
+            `).join("")}
+          </select>
+        </label>
+      `;
+    }
     const type = row.sensitive ? "password" : "text";
     const placeholder = row.sensitive && row.configured ? "задано, оставьте пустым чтобы не менять" : "";
     return `
