@@ -6,7 +6,7 @@
 
 ## Что подготовить заранее
 
-- Ключ XyraNet Wholesale API.
+- Ключ XyraNet Wholesale API. Его берут в личном кабинете XyraNet в разделе для реселлеров/wholesale API.
 - Токен Telegram-бота от BotFather.
 - Telegram ID главного администратора.
 - Для Plati.Market/Digiseller: Seller ID и API key Digiseller.
@@ -14,6 +14,17 @@
 - Домен для панели, если хотите заходить по красивому HTTPS-адресу.
 
 Если домена нет, панель всё равно можно открыть через SSH-туннель.
+
+## Где взять данные XyraNet
+
+- Сайт XyraNet: [https://xyranet.pro](https://xyranet.pro)
+- Telegram-бот XyraNet: [@xyranet_bot](https://t.me/xyranet_bot)
+- Wholesale API docs: [https://xyranet.pro/wholesale-api-docs](https://xyranet.pro/wholesale-api-docs)
+- Базовый API URL для панели: `https://xyranet.pro/api/wholesale`
+
+В кабинете XyraNet откройте раздел для реселлеров/wholesale API и скопируйте API key. Этот ключ вставляется в веб-панели в “Настройки” -> `XyraNet API key`.
+
+Баланс пополняется не в этой панели. Пополняйте wholesale-баланс на сайте XyraNet или через официальный Telegram-бот [@xyranet_bot](https://t.me/xyranet_bot). После пополнения проверьте баланс в нашей панели через вкладку “Диагностика” или проверку `XyraNet API`.
 
 ## Как работает продажа
 
