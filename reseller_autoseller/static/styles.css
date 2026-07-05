@@ -375,8 +375,10 @@ p {
 }
 
 .template-editor {
+  grid-column: 1 / -1;
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .template-head {
@@ -384,6 +386,16 @@ p {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.template-head .panel-actions {
+  justify-content: flex-end;
+}
+
+#deliveryTemplate {
+  width: 100%;
+  min-height: 320px;
 }
 
 .variable-buttons {
