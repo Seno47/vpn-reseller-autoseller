@@ -53,6 +53,22 @@ class FakeXyraClient:
             }
         }
 
+    async def get_order(self, order_id: str):
+        self.calls += 1
+        return {
+            "order": {
+                "order_id": order_id,
+                "panel_username": "panel_user",
+                "subscription": {
+                    "subscription_url": "https://x.example/sub-status",
+                    "tariff_code": "lite_monthly",
+                    "expire_at": "2026-10-01T00:00:00Z",
+                    "device_limit": 2,
+                    "lte_quota": 10,
+                },
+            }
+        }
+
     async def tariffs(self):
         return [{"code": "lite_monthly", "api_price_rub": "113"}]
 
@@ -89,6 +105,33 @@ class DeliveryServiceTests(unittest.TestCase):
             self.assertEqual(service.expected_command("renew"), "!extend")
             self.assertEqual(service.action_for_command("!extend"), "renew")
 
+    def test_status_command_can_be_changed_and_detected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "test.sqlite3")
+            db.init()
+            service = DeliveryService(db=db, xyranet=FakeXyraClient())
+
+            service.set_expected_command("status", "!info")
+
+            self.assertEqual(service.expected_command("status"), "!info")
+            self.assertEqual(service.action_for_command("!info"), "status")
+
+    def test_command_help_keeps_status_and_respects_free_reissue_toggle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "test.sqlite3")
+            db.init()
+
+            disabled_service = DeliveryService(db=db, xyranet=FakeXyraClient(), free_reissue_enabled=False)
+            disabled_text = disabled_service.render_system_text("command_help")
+            self.assertIn("!status {ORDER_ID}", disabled_text)
+            self.assertNotIn("!reissue", disabled_text)
+            self.assertNotIn("{STATUS_COMMAND_EXAMPLE}", disabled_text)
+
+            enabled_service = DeliveryService(db=db, xyranet=FakeXyraClient(), free_reissue_enabled=True)
+            enabled_text = enabled_service.render_system_text("command_help")
+            self.assertIn("!status {ORDER_ID}", enabled_text)
+            self.assertIn("!reissue {ORDER_ID}", enabled_text)
+
     def test_purchase_template_group_has_no_reissue_command(self) -> None:
         group = next(item for item in TEMPLATE_GROUPS if item["key"] == "create")
 
@@ -102,6 +145,15 @@ class DeliveryServiceTests(unittest.TestCase):
         self.assertEqual(group["command_action"], "reissue")
         self.assertIn("free_reissue_help", stage_keys)
         self.assertIn("free_reissue_disabled", stage_keys)
+
+    def test_status_template_group_has_command_and_status_templates(self) -> None:
+        group = next(item for item in TEMPLATE_GROUPS if item["key"] == "status")
+        stage_keys = {stage["key"] for stage in group["stages"]}
+
+        self.assertEqual(group["command_action"], "status")
+        self.assertIn("status_help", stage_keys)
+        self.assertIn("status", stage_keys)
+        self.assertIn("status_error", stage_keys)
 
     def test_order_id_parser_ignores_placeholder(self) -> None:
         self.assertEqual(extract_order_id_from_text("!renew {ORDER_ID}"), "")
@@ -267,6 +319,24 @@ class DeliveryServiceTests(unittest.TestCase):
                 self.assertEqual(completed["status"], "delivered")
                 self.assertIn("Подписка продлена", completed["delivery_text"])
                 self.assertEqual(client.calls, 1)
+
+        asyncio.run(scenario())
+
+    def test_subscription_status_renders_order_details(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                client = FakeXyraClient()
+                service = DeliveryService(db=db, xyranet=client)
+
+                result = await service.subscription_status("xyra-order-1")
+
+                self.assertEqual(result["status"], "delivered")
+                self.assertIn("Статус подписки", result["delivery_text"])
+                self.assertIn("xyra-order-1", result["delivery_text"])
+                self.assertIn("lite_monthly", result["delivery_text"])
+                self.assertIn("https://x.example/sub-status", result["delivery_text"])
 
         asyncio.run(scenario())
 

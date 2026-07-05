@@ -52,12 +52,23 @@ DEFAULT_ACTION_TEMPLATES = {
 
 🔑 ID заказа: {ORDER_ID}
 👥 Устройств: {DEVICE_LIMIT}""",
+    "status": """📊 Статус подписки
+
+🔑 ID заказа: {ORDER_ID}
+👤 Профиль: {PANEL_USERNAME}
+📦 Тариф: {TARIFF_CODE}
+👥 Устройств: {DEVICE_LIMIT}
+📶 LTE-квота: {LTE_QUOTA}
+⏳ Действует до: {EXPIRE_AT}
+
+🔗 Ссылка подключения:
+{SUBSCRIPTION_URL}""",
 }
 
 DEFAULT_ACTION_TEMPLATES.update(
     {
-        "command_help": """ℹ️ Бесплатный перевыпуск подписки:
-!reissue {ORDER_ID} — получить новую ссылку подписки""",
+        "command_help": """ℹ️ Полезная команда:
+{STATUS_COMMAND_EXAMPLE} — проверить срок, тариф и ссылку подписки{FREE_REISSUE_COMMAND_LINE}""",
         "ask_renew": """✅ Оплата продления получена.
 
 Чтобы применить продление, отправьте в этот чат:
@@ -96,6 +107,15 @@ ID заказа указан в первой выдаче доступа.""",
         "free_reissue_disabled": """ℹ️ Бесплатный перевыпуск через чат сейчас отключён.
 
 Чтобы перевыпустить подписку, купите лот перевыпуска и отправьте ID заказа в чат после оплаты.""",
+        "status_help": """ℹ️ Чтобы проверить статус подписки, отправьте:
+{COMMAND_EXAMPLE}
+
+ID заказа указан в первой выдаче доступа.""",
+        "status_error": """⚠️ Не удалось получить статус подписки.
+
+Проверьте ID заказа и попробуйте ещё раз.
+
+Ошибка: {ERROR}""",
     }
 )
 
@@ -127,6 +147,9 @@ ACTION_LABELS.update(
         "operation_error": "Ошибка выполнения",
         "free_reissue_help": "Подсказка бесплатного перевыпуска",
         "free_reissue_disabled": "Бесплатный перевыпуск отключён",
+        "status": "Статус подписки",
+        "status_help": "Подсказка статуса",
+        "status_error": "Ошибка статуса",
     }
 )
 
@@ -145,6 +168,9 @@ TEMPLATE_CATEGORIES = {
     "operation_error": "Ошибки",
     "free_reissue_help": "Команды",
     "free_reissue_disabled": "Команды",
+    "status": "Команды",
+    "status_help": "Команды",
+    "status_error": "Ошибки",
 }
 
 OPERATION_ACTIONS = {"create", "renew", "reissue", "traffic", "ip_limit"}
@@ -162,6 +188,7 @@ DEFAULT_CHAT_COMMANDS = {
     "reissue": "!reissue",
     "traffic": "!traffic",
     "ip_limit": "!ip",
+    "status": "!status",
 }
 
 TEMPLATE_GROUPS = [
@@ -218,6 +245,16 @@ TEMPLATE_GROUPS = [
             {"key": "ip_limit_error", "stage": "error", "label": "Ошибка выполнения"},
         ],
     },
+    {
+        "key": "status",
+        "label": ACTION_LABELS["status"],
+        "command_action": "status",
+        "stages": [
+            {"key": "status_help", "stage": "missing_order_id", "label": "Команда без ID заказа"},
+            {"key": "status", "stage": "delivered", "label": "Статус получен"},
+            {"key": "status_error", "stage": "error", "label": "Ошибка получения статуса"},
+        ],
+    },
 ]
 
 TEMPLATE_KEYS = {stage["key"] for group in TEMPLATE_GROUPS for stage in group["stages"]}
@@ -242,6 +279,9 @@ CHAT_COMMAND_ALIASES = {
     "ip": "ip_limit",
     "ip_limit": "ip_limit",
     "limit": "ip_limit",
+    "status": "status",
+    "info": "status",
+    "check": "status",
 }
 CHAT_COMMAND_RE = re.compile(r"(?:^|\s)!([a-z0-9_:-]+)\b([^\n\r]*)", re.IGNORECASE)
 
@@ -249,6 +289,9 @@ DELIVERY_TEMPLATE_VARIABLES = {
     "ACTION_LABEL": "Название действия",
     "COMMAND": "Команда в чате",
     "COMMAND_EXAMPLE": "Пример команды",
+    "STATUS_COMMAND_EXAMPLE": "Пример команды статуса",
+    "REISSUE_COMMAND_EXAMPLE": "Пример команды перевыпуска",
+    "FREE_REISSUE_COMMAND_LINE": "Строка бесплатного перевыпуска",
     "ERROR": "Текст ошибки",
     "COMMAND_HELP": "Подсказка по командам",
     "PURCHASE_QUANTITY": "Количество купленных единиц",
@@ -265,6 +308,9 @@ DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
     "ACTION_LABEL": "Название текущего действия: покупка, продление, перевыпуск, LTE-трафик или IP-лимит.",
     "COMMAND": "Команда для выбранного сценария без параметров, например !renew.",
     "COMMAND_EXAMPLE": "Готовый пример команды с ID заказа, например !renew {ORDER_ID}.",
+    "STATUS_COMMAND_EXAMPLE": "Готовый пример команды проверки статуса с ID заказа.",
+    "REISSUE_COMMAND_EXAMPLE": "Готовый пример команды перевыпуска с ID заказа.",
+    "FREE_REISSUE_COMMAND_LINE": "Строка с командой бесплатного перевыпуска. Пустая, если бесплатный перевыпуск выключен.",
     "ERROR": "Текст ошибки, если выполнение услуги не удалось.",
     "COMMAND_HELP": "Составная переменная с большим редактируемым блоком подсказки по командам.",
     "PURCHASE_QUANTITY": "Количество купленных единиц товара в заказе.",
@@ -466,7 +512,7 @@ class DeliveryService:
                 payload={"item_number": item_number, "order_id": delivery["order_id"]},
             )
         delivery["purchase_quantity"] = str(quantity)
-        delivery["command_help"] = self.render_system_text("command_help", delivery) if self.is_free_reissue_enabled() else ""
+        delivery["command_help"] = self.render_system_text("command_help", delivery)
 
         delivery_text = self.render_action_text("create", delivery)
         raw_response: dict[str, Any] = api_response
@@ -656,6 +702,12 @@ class DeliveryService:
         text = self.render_action_text("reissue", {**delivery, "order_id": target_order_id})
         return {"status": "delivered", "delivery_text": text, "raw_response": response}
 
+    async def subscription_status(self, target_order_id: str) -> dict[str, Any]:
+        response = await self.xyranet.get_order(target_order_id)
+        delivery = extract_order_delivery(response)
+        text = self.render_action_text("status", {**delivery, "order_id": target_order_id})
+        return {"status": "delivered", "delivery_text": text, "raw_response": response}
+
     @staticmethod
     def product_action_params(product: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -675,7 +727,7 @@ class DeliveryService:
 
     def render_system_text(self, template_key: str, values: dict[str, Any] | None = None) -> str:
         source = self.db.get_setting(delivery_template_key(template_key)) or DEFAULT_ACTION_TEMPLATES.get(template_key, "")
-        return self.render_template_with_complex_variables(source, values or self.command_context(""))
+        return self.render_template_with_complex_variables(source, {**self.command_context(template_key), **(values or {})})
 
     def render_template_with_complex_variables(self, source: str, values: dict[str, Any]) -> str:
         context = {str(key): "" if value is None else str(value) for key, value in values.items()}
@@ -794,7 +846,7 @@ class DeliveryService:
 
     def action_for_command(self, command: str) -> str:
         normalized = normalize_chat_command(command)
-        for action in ("renew", "reissue", "traffic", "ip_limit"):
+        for action in DEFAULT_CHAT_COMMANDS:
             if normalized == self.expected_command(action):
                 return action
         return CHAT_COMMAND_ALIASES.get(normalized.lstrip("!"), "")
@@ -851,13 +903,23 @@ class DeliveryService:
 
     def command_context(self, action: str) -> dict[str, str]:
         command = self.expected_command(action)
-        return {
+        context = {
             "action": action,
             "action_label": ACTION_LABELS.get(action, action),
             "command": command,
             "command_example": f"{command} {{ORDER_ID}}",
+            "free_reissue_command_line": (
+                f"\n{self.expected_command('reissue')} {{ORDER_ID}} — получить новую ссылку подписки"
+                if self.is_free_reissue_enabled()
+                else ""
+            ),
             "order_id": "{ORDER_ID}",
         }
+        for command_action in DEFAULT_CHAT_COMMANDS:
+            action_command = self.expected_command(command_action)
+            context[f"{command_action}_command"] = action_command
+            context[f"{command_action}_command_example"] = f"{action_command} {{ORDER_ID}}"
+        return context
 
 
 def extract_order_delivery(response: dict[str, Any]) -> dict[str, str]:

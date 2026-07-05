@@ -242,6 +242,7 @@ TEMPLATE_LABELS_EN = {
     "reissue": "Reissue",
     "traffic": "LTE traffic",
     "ip_limit": "IP limit",
+    "status": "Subscription status",
     "command_help": "Chat commands",
     "ask_renew": "Ask for order_id: renewal",
     "ask_reissue": "Ask for order_id: reissue",
@@ -251,6 +252,8 @@ TEMPLATE_LABELS_EN = {
     "operation_error": "Operation error",
     "free_reissue_help": "Free reissue hint",
     "free_reissue_disabled": "Free reissue disabled",
+    "status_help": "Status command hint",
+    "status_error": "Status error",
     "renew_command_mismatch": "Wrong command: renewal",
     "renew_error": "Renewal error",
     "reissue_command_mismatch": "Wrong command: reissue",
@@ -281,6 +284,9 @@ TEMPLATE_STAGE_LABELS_EN = {
     "ip_limit": "order_id received, IP limit increased",
     "ip_limit_command_mismatch": "Command does not match the lot",
     "ip_limit_error": "Operation error",
+    "status_help": "Command without order ID",
+    "status": "Status received",
+    "status_error": "Status error",
 }
 
 

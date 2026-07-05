@@ -541,6 +541,57 @@ def create_app() -> FastAPI:
             , kind="errors")
             return True
 
+    async def process_subscription_status_command(marketplace: str, chat_id: str, text: str) -> bool:
+        command = parse_chat_command(text)
+        if not command:
+            return False
+        if command["command"] != delivery_service.expected_command("status"):
+            return False
+        if not command["order_id"]:
+            await messenger.send_message(
+                marketplace,
+                chat_id,
+                delivery_service.render_system_text("status_help", delivery_service.command_context("status")),
+            )
+            return True
+        try:
+            result = await delivery_service.subscription_status(command["order_id"])
+            await messenger.send_message(marketplace, chat_id, str(result["delivery_text"]))
+            db.add_order_event(
+                marketplace=marketplace,
+                external_order_id=chat_id,
+                event_type="subscription_status_sent",
+                status="success",
+                payload={"target_order_id": command["order_id"]},
+            )
+            return True
+        except Exception as exc:
+            log.exception("Cannot process subscription status command from chat %s:%s", marketplace, chat_id)
+            await messenger.send_message(
+                marketplace,
+                chat_id,
+                delivery_service.render_system_text(
+                    "status_error",
+                    {**delivery_service.command_context("status"), "order_id": command["order_id"], "error": str(exc)},
+                ),
+            )
+            db.add_order_event(
+                marketplace=marketplace,
+                external_order_id=chat_id,
+                event_type="subscription_status_failed",
+                status="error",
+                message=str(exc),
+                payload={"target_order_id": command["order_id"]},
+            )
+            notify_admins(
+                f"🚨 <b>{tr('Ошибка статуса подписки', 'Subscription status error')}</b>\n"
+                f"{tr('Чат', 'Chat')}: <code>{escape(marketplace)}:{escape(chat_id)}</code>\n"
+                f"{tr('ID заказа', 'Order ID')}: <code>{escape(command['order_id'])}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return True
+
     async def poll_digiseller_unique_code_chats() -> None:
         if not digiseller_polling_configured():
             return
@@ -583,6 +634,9 @@ def create_app() -> FastAPI:
                     handled = await process_unique_code_message(invoice_id, code)
                     if handled:
                         break
+                if handled:
+                    break
+                handled = await process_subscription_status_command("plati", invoice_id, text)
                 if handled:
                     break
                 handled = await process_free_reissue_command(invoice_id, text, current_id)
@@ -675,6 +729,7 @@ def create_app() -> FastAPI:
                     found_order_id = ""
                     wrong_command_action = ""
                     missing_command_order_id = False
+                    status_command_handled = False
                     should_process = not last_seen
                     for message in messages:
                         current_id = message_id(message)
@@ -696,6 +751,13 @@ def create_app() -> FastAPI:
                             )
                         command = parse_chat_command(text)
                         if command:
+                            if command["command"] == delivery_service.expected_command("status"):
+                                status_command_handled = await process_subscription_status_command(
+                                    str(operation["marketplace"]),
+                                    str(operation["external_order_id"]),
+                                    text,
+                                )
+                                break
                             expected_action = str(operation["action"])
                             if command["command"] != delivery_service.expected_command(expected_action):
                                 command_action = delivery_service.action_for_command(command["command"]) or command["action"]
@@ -711,6 +773,8 @@ def create_app() -> FastAPI:
                             break
                     if last_message and last_message != last_seen:
                         db.update_pending_last_message(int(operation["id"]), last_message)
+                    if status_command_handled:
+                        continue
                     if wrong_command_action:
                         db.add_order_event(
                             marketplace=str(operation["marketplace"]),
