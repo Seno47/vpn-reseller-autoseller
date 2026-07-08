@@ -142,7 +142,26 @@ class DeliveryServiceTests(unittest.TestCase):
         group = next(item for item in TEMPLATE_GROUPS if item["key"] == "digiseller")
 
         self.assertNotIn("command_action", group)
-        self.assertEqual([stage["key"] for stage in group["stages"]], ["request_unique_code"])
+        self.assertEqual(
+            [stage["key"] for stage in group["stages"]],
+            ["request_unique_code", "unique_code_invoice_mismatch"],
+        )
+
+    def test_unique_code_invoice_mismatch_template_renders_order_ids(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "test.sqlite3")
+            db.init()
+            service = DeliveryService(db=db, xyranet=FakeXyraClient())
+
+            text = service.render_system_text(
+                "unique_code_invoice_mismatch",
+                {"marketplace_order_id": "296106996", "code_order_id": "295956496"},
+            )
+
+            self.assertIn("296106996", text)
+            self.assertIn("295956496", text)
+            self.assertNotIn("{MARKETPLACE_ORDER_ID}", text)
+            self.assertNotIn("{CODE_ORDER_ID}", text)
 
     def test_reissue_template_group_owns_free_reissue_templates(self) -> None:
         group = next(item for item in TEMPLATE_GROUPS if item["key"] == "reissue")

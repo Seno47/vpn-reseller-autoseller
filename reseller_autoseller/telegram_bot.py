@@ -16,10 +16,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from reseller_autoseller.db import Database
-from reseller_autoseller.digiseller_client import (
-    DigisellerApiError,
-    sale_event_from_unique_code,
-)
 from reseller_autoseller.marketplaces import SUPPORTED_MARKETPLACES
 from reseller_autoseller.runtime_config import RuntimeConfig, SETTING_BY_KEY, SETTING_DEFINITIONS
 from reseller_autoseller.services import (
@@ -257,6 +253,7 @@ TEMPLATE_LABELS_EN = {
     "status_help": "Status command hint",
     "status_error": "Status error",
     "request_unique_code": "Ask for unique code",
+    "unique_code_invoice_mismatch": "Code from another order",
     "renew_command_mismatch": "Wrong command: renewal",
     "renew_error": "Renewal error",
     "reissue_command_mismatch": "Wrong command: reissue",
@@ -291,6 +288,7 @@ TEMPLATE_STAGE_LABELS_EN = {
     "status": "Status received",
     "status_error": "Status error",
     "request_unique_code": "Buyer has not sent unique code",
+    "unique_code_invoice_mismatch": "Code from another order",
 }
 
 
@@ -482,8 +480,8 @@ def build_dispatcher(
             await message.answer(
                 tr(
                     language,
-                    "🔑 Пришлите сюда 16-символьный код покупки Plati.Market/Digiseller. Я проверю оплату и выдам VPN-доступ.",
-                    "🔑 Send the 16-character Plati.Market/Digiseller purchase code here. I will verify the payment and deliver VPN access.",
+                    "🔑 Для получения покупки отправьте 16-символьный код в чат вашего заказа на Plati.Market/Digiseller. В Telegram код не принимается, потому что выдача привязана к конкретному чату покупки.",
+                    "🔑 To receive your purchase, send the 16-character code in your Plati.Market/Digiseller order chat. Telegram does not accept codes because delivery is tied to the exact purchase chat.",
                 )
             )
             return
@@ -1038,52 +1036,23 @@ def build_dispatcher(
         text = (message.text or "").strip().replace(" ", "").replace("-", "")
         if text.startswith("/"):
             return
-        if not UNIQUE_CODE_RE.fullmatch(text):
-            if not is_admin(user_id(message)):
-                await message.answer(
-                    tr(
-                        language,
-                        "🔑 Пришлите 16-символьный код покупки без пробелов.",
-                        "🔑 Send the 16-character purchase code without spaces.",
-                    )
+        if UNIQUE_CODE_RE.fullmatch(text):
+            await message.answer(
+                tr(
+                    language,
+                    "🔒 Для безопасности отправьте уникальный код именно в чат заказа Plati.Market/Digiseller. Так я смогу проверить, что код относится к этой покупке.",
+                    "🔒 For safety, send the unique code in the Plati.Market/Digiseller order chat. That lets me verify that the code belongs to that purchase.",
                 )
+            )
             return
-        await message.answer(tr(language, "🔎 Проверяю код покупки...", "🔎 Checking purchase code..."))
-        try:
-            purchase = await digiseller.purchase_by_unique_code(text)
-            event = sale_event_from_unique_code(purchase, text)
-            if not event.external_order_id or not event.external_product_id:
-                await message.answer(
-                    tr(
-                        language,
-                        "⚠️ Код найден, но Digiseller не вернул номер заказа или ID товара.",
-                        "⚠️ Code found, but Digiseller did not return the order number or product ID.",
-                    )
+        if not is_admin(user_id(message)):
+            await message.answer(
+                tr(
+                    language,
+                    "🔑 Уникальный код нужно отправить в чат заказа Plati.Market/Digiseller, не сюда.",
+                    "🔑 Send the unique code in the Plati.Market/Digiseller order chat, not here.",
                 )
-                return
-            existing = db.get_sale_with_delivery(event.marketplace, event.external_order_id)
-            if not existing and purchase.get("inv") not in (None, ""):
-                existing = db.get_sale_with_delivery(event.marketplace, str(purchase["inv"]))
-            if existing and existing.get("delivery_id"):
-                await message.answer(existing["delivery_text"])
-                return
-            result = await delivery_service.handle_sale(event)
-            try:
-                if result.get("status") == "delivered":
-                    await digiseller.mark_unique_code_delivered(text)
-            except DigisellerApiError:
-                pass
-            await message.answer(result["delivery_text"])
-        except DigisellerApiError as exc:
-            await message.answer(
-                f"⚠️ {tr(language, 'Не получилось проверить код', 'Could not verify code')}: <code>{escape(str(exc))}</code>"
             )
-        except ValueError as exc:
-            await message.answer(
-                f"⚠️ {tr(language, 'Не получилось выдать доступ', 'Could not deliver access')}: <code>{escape(str(exc))}</code>"
-            )
-        except Exception as exc:
-            await message.answer(f"⚠️ {tr(language, 'Ошибка выдачи', 'Delivery error')}: <code>{escape(str(exc))}</code>")
 
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)

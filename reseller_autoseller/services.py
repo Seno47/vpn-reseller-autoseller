@@ -127,6 +127,12 @@ ID заказа указан в первой выдаче доступа.""",
 
 ✅ После проверки кода бот сразу отправит VPN-доступ.
 ⚠️ Не отправляйте пароли, данные карты и лишние личные данные.""",
+        "unique_code_invoice_mismatch": """⚠️ Этот уникальный код относится к другому заказу Digiseller.
+
+📦 Текущий заказ: {MARKETPLACE_ORDER_ID}
+🔑 Заказ, найденный по коду: {CODE_ORDER_ID}
+
+Пожалуйста, пришлите уникальный код именно от этой покупки. Он указан на странице оплаченного заказа в строке «Уникальный код».""",
     }
 )
 
@@ -162,6 +168,7 @@ ACTION_LABELS.update(
         "status_help": "Подсказка статуса",
         "status_error": "Ошибка статуса",
         "request_unique_code": "Запрос уникального кода",
+        "unique_code_invoice_mismatch": "Код от другого заказа",
     }
 )
 
@@ -184,6 +191,7 @@ TEMPLATE_CATEGORIES = {
     "status_help": "Команды",
     "status_error": "Ошибки",
     "request_unique_code": "Digiseller",
+    "unique_code_invoice_mismatch": "Digiseller",
 }
 
 OPERATION_ACTIONS = {"create", "renew", "reissue", "traffic", "ip_limit"}
@@ -217,6 +225,7 @@ TEMPLATE_GROUPS = [
         "label": "Digiseller",
         "stages": [
             {"key": "request_unique_code", "stage": "waiting_unique_code", "label": "Покупатель не прислал уникальный код"},
+            {"key": "unique_code_invoice_mismatch", "stage": "wrong_unique_code", "label": "Код от другого заказа"},
         ],
     },
     {
@@ -329,6 +338,7 @@ DELIVERY_TEMPLATE_VARIABLES = {
     "PURCHASE_AMOUNT": "Сумма покупки",
     "PURCHASE_CURRENCY": "Валюта покупки",
     "UNIQUE_CODE_STATE": "Статус уникального кода",
+    "CODE_ORDER_ID": "ID заказа, которому принадлежит присланный код",
 }
 
 DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
@@ -355,6 +365,7 @@ DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
     "PURCHASE_AMOUNT": "Сумма покупки из данных площадки.",
     "PURCHASE_CURRENCY": "Валюта покупки из данных площадки.",
     "UNIQUE_CODE_STATE": "Числовой статус уникального кода Digiseller из purchase/info.",
+    "CODE_ORDER_ID": "Номер заказа Digiseller, который вернулся при проверке уникального кода.",
 }
 
 COMPLEX_VARIABLES_SETTING = "custom_complex_variables"

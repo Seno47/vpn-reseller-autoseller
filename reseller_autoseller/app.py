@@ -28,6 +28,7 @@ from reseller_autoseller.digiseller_client import (
     purchase_amount,
     purchase_buyer_email,
     purchase_currency,
+    purchase_invoice_id,
     purchase_paid_at,
     purchase_product_id,
     purchase_variant_id,
@@ -79,6 +80,12 @@ ADMIN_SESSION_TTL_SECONDS = 24 * 60 * 60
 LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
 DIGISELLER_NAIVE_DATETIME_ZONE = timezone(timedelta(hours=3), "MSK")
+
+
+def digiseller_invoice_matches_chat(chat_invoice_id: str, code_invoice_id: str) -> bool:
+    return bool(str(chat_invoice_id or "").strip() and str(code_invoice_id or "").strip()) and (
+        str(chat_invoice_id).strip() == str(code_invoice_id).strip()
+    )
 
 
 class ProductMappingIn(BaseModel):
@@ -350,7 +357,7 @@ def create_app() -> FastAPI:
         try:
             minutes = runtime.get_float("digiseller_unique_code_request_delay_minutes")
         except Exception:
-            minutes = 30.0
+            minutes = 15.0
         return timedelta(minutes=max(0.0, min(minutes, 24 * 60)))
 
     def marketplace_messages_configured(marketplace: str) -> bool:
@@ -516,6 +523,40 @@ def create_app() -> FastAPI:
         )
         try:
             purchase = await digiseller.purchase_by_unique_code(code)
+            code_invoice_id = purchase_invoice_id(purchase)
+            if not digiseller_invoice_matches_chat(invoice_id, code_invoice_id):
+                db.add_order_event(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    event_type="unique_code_invoice_mismatch",
+                    status="warning",
+                    message="Unique code belongs to another Digiseller invoice",
+                    payload={
+                        "unique_code": code,
+                        "chat_invoice_id": invoice_id,
+                        "code_invoice_id": code_invoice_id,
+                        "id_goods": purchase.get("id_goods"),
+                    },
+                )
+                await messenger.send_message(
+                    "plati",
+                    invoice_id,
+                    delivery_service.render_system_text(
+                        "unique_code_invoice_mismatch",
+                        {
+                            "marketplace_order_id": invoice_id,
+                            "code_order_id": code_invoice_id,
+                            "product_id": str(purchase.get("id_goods") or ""),
+                        },
+                    ),
+                )
+                notify_admins(
+                    f"⚠️ <b>{tr('Уникальный код не от этого заказа', 'Unique code belongs to another order')}</b>\n"
+                    f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
+                    f"{tr('Заказ кода', 'Code order')}: <code>{escape(code_invoice_id or tr('не определён', 'unknown'))}</code>",
+                    kind="pending",
+                )
+                return True
             event = sale_event_from_unique_code(purchase, code)
             db.add_order_event(
                 marketplace=event.marketplace,

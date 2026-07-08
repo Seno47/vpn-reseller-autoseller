@@ -135,7 +135,8 @@ const RU_TO_EN = {
   "order_id получен, IP-лимит увеличен": "order_id received, IP limit increased",
   "Digiseller": "Digiseller",
   "Запрос уникального кода": "Unique code request",
-  "Покупатель не прислал уникальный код": "Buyer has not sent the unique code"
+  "Покупатель не прислал уникальный код": "Buyer has not sent the unique code",
+  "Код от другого заказа": "Code from another order"
 };
 
 const textNodeOriginals = new WeakMap();
