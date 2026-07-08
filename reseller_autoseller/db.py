@@ -595,6 +595,28 @@ class Database:
                 (marketplace, external_order_id, last_message_id, now),
             )
 
+    def list_chat_cursors(self, marketplace: str | None = None, *, limit: int = 200) -> list[dict[str, Any]]:
+        selected_limit = max(1, min(int(limit), 1000))
+        if marketplace:
+            query = """
+                SELECT marketplace, external_order_id, last_message_id, updated_at
+                FROM marketplace_chat_cursors
+                WHERE marketplace=?
+                ORDER BY updated_at DESC
+                LIMIT ?
+            """
+            params: tuple[Any, ...] = (marketplace, selected_limit)
+        else:
+            query = """
+                SELECT marketplace, external_order_id, last_message_id, updated_at
+                FROM marketplace_chat_cursors
+                ORDER BY updated_at DESC
+                LIMIT ?
+            """
+            params = (selected_limit,)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params)]
+
     def add_order_event(
         self,
         *,

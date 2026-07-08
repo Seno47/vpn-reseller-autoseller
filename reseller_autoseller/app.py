@@ -305,6 +305,17 @@ def create_app() -> FastAPI:
                 return str(message[key])
         return ""
 
+    def message_is_from_buyer(message: dict[str, Any]) -> bool:
+        seller_markers = ("seller", "is_seller", "from_seller", "seller_message")
+        buyer_markers = ("buyer", "is_buyer", "from_buyer", "customer", "is_customer")
+        for key in seller_markers:
+            if key in message and str(message.get(key)).strip().lower() in {"1", "true", "yes"}:
+                return False
+        for key in buyer_markers:
+            if key in message and str(message.get(key)).strip().lower() in {"1", "true", "yes"}:
+                return True
+        return True
+
     def pick_recursive(payload: Any, *keys: str) -> str:
         key_set = {key.lower() for key in keys}
         if isinstance(payload, dict):
@@ -769,63 +780,76 @@ def create_app() -> FastAPI:
             )
             return True
 
+    async def process_digiseller_chat_messages(invoice_id: str) -> bool:
+        last_seen = db.get_chat_cursor("plati", invoice_id)
+        try:
+            messages = await digiseller.order_messages(
+                invoice_id,
+                count=50,
+                newer=bool(last_seen),
+                old_id=last_seen,
+            )
+        except Exception:
+            log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}")
+            return False
+        if not messages and last_seen:
+            try:
+                await digiseller.mark_order_messages_seen(invoice_id)
+            except Exception:
+                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+            return False
+        last_message = last_seen
+        handled = False
+        for message in messages:
+            current_id = message_id(message)
+            if current_id:
+                last_message = current_id
+            if not message_is_from_buyer(message):
+                continue
+            text = message_text(message)
+            if text and current_id != last_seen:
+                notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
+            for code in unique_codes_from_text(text):
+                handled = await process_unique_code_message(invoice_id, code)
+                if handled:
+                    break
+            if handled:
+                break
+            handled = await process_subscription_status_command("plati", invoice_id, text)
+            if handled:
+                break
+            handled = await process_free_reissue_command(invoice_id, text, current_id)
+            if handled:
+                break
+        if last_message and last_message != last_seen:
+            db.set_chat_cursor("plati", invoice_id, last_message)
+        if handled:
+            try:
+                await digiseller.mark_order_messages_seen(invoice_id)
+            except Exception:
+                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+        return handled
+
     async def poll_digiseller_unique_code_chats() -> None:
         if not digiseller_polling_configured():
             return
+        seen_invoice_ids: set[str] = set()
         try:
             chats = await digiseller.order_chats(filter_new=True, rows=100)
         except Exception:
             log_poll_error("digiseller_chats", "Cannot read Digiseller unread chats")
-            return
+            chats = []
         for chat in chats:
             invoice_id = chat_invoice_id(chat)
             if not invoice_id:
                 continue
-            last_seen = db.get_chat_cursor("plati", invoice_id)
-            try:
-                messages = await digiseller.order_messages(
-                    invoice_id,
-                    count=50,
-                    newer=bool(last_seen),
-                    old_id=last_seen,
-                )
-            except Exception:
-                log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}")
+            seen_invoice_ids.add(invoice_id)
+            await process_digiseller_chat_messages(invoice_id)
+        for cursor in db.list_chat_cursors("plati", limit=200):
+            invoice_id = str(cursor.get("external_order_id") or "").strip()
+            if not invoice_id or invoice_id in seen_invoice_ids:
                 continue
-            if not messages and last_seen:
-                try:
-                    await digiseller.mark_order_messages_seen(invoice_id)
-                except Exception:
-                    log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
-                continue
-            last_message = last_seen
-            handled = False
-            for message in messages:
-                current_id = message_id(message)
-                if current_id:
-                    last_message = current_id
-                text = message_text(message)
-                if text and current_id != last_seen:
-                    notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
-                for code in unique_codes_from_text(text):
-                    handled = await process_unique_code_message(invoice_id, code)
-                    if handled:
-                        break
-                if handled:
-                    break
-                handled = await process_subscription_status_command("plati", invoice_id, text)
-                if handled:
-                    break
-                handled = await process_free_reissue_command(invoice_id, text, current_id)
-                if handled:
-                    break
-            if last_message and last_message != last_seen:
-                db.set_chat_cursor("plati", invoice_id, last_message)
-            if handled:
-                try:
-                    await digiseller.mark_order_messages_seen(invoice_id)
-                except Exception:
-                    log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+            await process_digiseller_chat_messages(invoice_id)
 
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
         if not digiseller_unique_code_requests_enabled():

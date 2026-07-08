@@ -170,6 +170,21 @@ class ProductMappingDbTests(unittest.TestCase):
             self.assertEqual(rows[0]["event_type"], "sale_received")
             self.assertIn('"code": "abc"', rows[0]["payload"])
 
+    def test_chat_cursors_can_be_listed_by_marketplace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "test.sqlite3")
+            db.init()
+
+            db.set_chat_cursor("plati", "296135343", "240824924")
+            db.set_chat_cursor("ggsel", "gg-1", "10")
+
+            rows = db.list_chat_cursors("plati")
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["marketplace"], "plati")
+            self.assertEqual(rows[0]["external_order_id"], "296135343")
+            self.assertEqual(rows[0]["last_message_id"], "240824924")
+
 
 if __name__ == "__main__":
     unittest.main()
