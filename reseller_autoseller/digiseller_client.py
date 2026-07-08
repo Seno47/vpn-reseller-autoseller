@@ -229,19 +229,6 @@ class DigisellerClient:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot mark messages seen"))
         return data
 
-    async def order_chat_state(self, invoice_id: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/debates/v2/chat-state",
-                params={"token": token, "id_i": invoice_id},
-                headers={"Accept": "application/json"},
-            )
-        data = self._json(response)
-        if int(data.get("retval", 0)) != 0:
-            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read chat state"))
-        return data
-
     async def send_order_message(self, invoice_id: str, message: str) -> dict[str, Any]:
         token = await self.token()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -294,38 +281,6 @@ class DigisellerClient:
                 if nested:
                     return nested
         return []
-
-    @staticmethod
-    def _pick_recursive(payload: Any, *keys: str) -> str:
-        key_set = {key.lower() for key in keys}
-        if isinstance(payload, dict):
-            for key, value in payload.items():
-                if key.lower() in key_set and value not in (None, ""):
-                    return str(value).strip()
-                found = DigisellerClient._pick_recursive(value, *keys)
-                if found:
-                    return found
-        if isinstance(payload, list):
-            for item in payload:
-                found = DigisellerClient._pick_recursive(item, *keys)
-                if found:
-                    return found
-        return ""
-
-    async def keep_online(self) -> dict[str, Any]:
-        chats = await self.order_chats(filter_new=False, rows=1)
-        invoice_id = ""
-        chat_state: dict[str, Any] = {}
-        if chats:
-            invoice_id = self._pick_recursive(chats[0], "id_i", "invoice_id", "inv", "order_id")
-            if invoice_id:
-                chat_state = await self.order_chat_state(invoice_id)
-        return {
-            "status": "ok",
-            "checked_chats": len(chats),
-            "invoice_id": invoice_id,
-            "chat_state": chat_state,
-        }
 
 
 class RuntimeDigisellerClient:
@@ -396,14 +351,8 @@ class RuntimeDigisellerClient:
     async def mark_order_messages_seen(self, invoice_id: str) -> dict[str, Any]:
         return await self.client().mark_order_messages_seen(invoice_id)
 
-    async def order_chat_state(self, invoice_id: str) -> dict[str, Any]:
-        return await self.client().order_chat_state(invoice_id)
-
     async def send_order_message(self, invoice_id: str, message: str) -> dict[str, Any]:
         return await self.client().send_order_message(invoice_id, message)
-
-    async def keep_online(self) -> dict[str, Any]:
-        return await self.client().keep_online()
 
 
 def sale_event_from_unique_code(purchase: dict[str, Any], unique_code: str = "") -> SaleEvent:

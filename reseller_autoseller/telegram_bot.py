@@ -116,7 +116,7 @@ def format_tariff_label(row: dict[str, Any], language: str = "ru") -> str:
 SETTING_GROUPS = [
     ({"ru": "🌐 Интерфейс", "en": "🌐 Interface"}, ["panel_language"]),
     ({"ru": "🔌 XyraNet", "en": "🔌 XyraNet"}, ["xyranet_api_base_url", "xyranet_api_key", "xyranet_timeout_seconds"]),
-    ({"ru": "🛒 Маркетплейсы", "en": "🛒 Marketplaces"}, ["digiseller_seller_id", "digiseller_api_key", "digiseller_unique_code_request_enabled", "digiseller_unique_code_request_delay_minutes", "plati_eternal_online_enabled", "plati_eternal_online_interval_minutes", "ggsel_seller_id", "ggsel_api_key"]),
+    ({"ru": "🛒 Маркетплейсы", "en": "🛒 Marketplaces"}, ["digiseller_seller_id", "digiseller_api_key", "digiseller_unique_code_request_enabled", "digiseller_unique_code_request_delay_minutes", "ggsel_seller_id", "ggsel_api_key"]),
     ({"ru": "🤖 Telegram", "en": "🤖 Telegram"}, ["enable_telegram", "telegram_bot_token", "free_reissue_enabled"]),
     ({"ru": "🔔 Уведомления", "en": "🔔 Notifications"}, ["notify_new_purchases", "notify_chat_messages", "notify_errors", "notify_pending", "notify_daily_statistics"]),
     ({"ru": "🛡 Веб-панель", "en": "🛡 Web panel"}, ["app_base_url", "admin_username", "admin_password"]),
@@ -132,8 +132,6 @@ SETTING_ICONS = {
     "digiseller_api_key": "🔑",
     "digiseller_unique_code_request_enabled": "📨",
     "digiseller_unique_code_request_delay_minutes": "⏱",
-    "plati_eternal_online_enabled": "🟢",
-    "plati_eternal_online_interval_minutes": "⏱",
     "ggsel_seller_id": "🛍",
     "ggsel_api_key": "🔑",
     "enable_telegram": "🤖",

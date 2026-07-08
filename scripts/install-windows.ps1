@@ -87,8 +87,6 @@ $ggselApiKey = Ask-Secret "GGsel API key (optional)"
   "",
   "DIGISELLER_SELLER_ID=$(Env-Value $digisellerSellerId)",
   "DIGISELLER_API_KEY=$(Env-Value $digisellerApiKey)",
-  "PLATI_ETERNAL_ONLINE_ENABLED=false",
-  "PLATI_ETERNAL_ONLINE_INTERVAL_MINUTES=2",
   "GGSEL_SELLER_ID=$(Env-Value $ggselSellerId)",
   "GGSEL_API_KEY=$(Env-Value $ggselApiKey)",
   "",
