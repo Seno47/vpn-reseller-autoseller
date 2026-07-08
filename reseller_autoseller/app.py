@@ -789,7 +789,7 @@ def create_app() -> FastAPI:
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
         if not digiseller_unique_code_requests_enabled():
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(DIGISELLER_NAIVE_DATETIME_ZONE)
         start = now - timedelta(hours=72)
         try:
             sales = await digiseller.seller_sales(
