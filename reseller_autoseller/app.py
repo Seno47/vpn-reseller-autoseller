@@ -316,6 +316,15 @@ def create_app() -> FastAPI:
                 return True
         return True
 
+    def message_action_signature(text: str) -> str:
+        command = parse_chat_command(text)
+        if command:
+            return f"command:{command['command']}:{command['order_id']}"
+        codes = unique_codes_from_text(text)
+        if codes:
+            return f"unique_code:{codes[0]}"
+        return ""
+
     def pick_recursive(payload: Any, *keys: str) -> str:
         key_set = {key.lower() for key in keys}
         if isinstance(payload, dict):
@@ -798,31 +807,43 @@ def create_app() -> FastAPI:
             except Exception:
                 log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
             return False
-        last_message = last_seen
+        cursor_to_save = last_seen
         handled = False
+        handled_signature = ""
         for message in messages:
             current_id = message_id(message)
+            from_buyer = message_is_from_buyer(message)
+            text = message_text(message) if from_buyer else ""
+            signature = message_action_signature(text) if text else ""
+            if handled:
+                if signature and signature == handled_signature:
+                    if current_id:
+                        cursor_to_save = current_id
+                    continue
+                break
             if current_id:
-                last_message = current_id
-            if not message_is_from_buyer(message):
+                cursor_to_save = current_id
+            if not from_buyer:
                 continue
-            text = message_text(message)
             if text and current_id != last_seen:
                 notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
             for code in unique_codes_from_text(text):
                 handled = await process_unique_code_message(invoice_id, code)
                 if handled:
+                    handled_signature = signature or f"unique_code:{code}"
                     break
             if handled:
-                break
+                continue
             handled = await process_subscription_status_command("plati", invoice_id, text)
             if handled:
-                break
+                handled_signature = signature
+                continue
             handled = await process_free_reissue_command(invoice_id, text, current_id)
             if handled:
-                break
-        if last_message and last_message != last_seen:
-            db.set_chat_cursor("plati", invoice_id, last_message)
+                handled_signature = signature
+                continue
+        if cursor_to_save and cursor_to_save != last_seen:
+            db.set_chat_cursor("plati", invoice_id, cursor_to_save)
         if handled:
             try:
                 await digiseller.mark_order_messages_seen(invoice_id)
