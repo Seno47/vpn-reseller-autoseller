@@ -162,6 +162,7 @@ def create_app() -> FastAPI:
     bot_task: asyncio.Task[Any] | None = None
     chat_task: asyncio.Task[Any] | None = None
     daily_task: asyncio.Task[Any] | None = None
+    plati_online_task: asyncio.Task[Any] | None = None
     bot_lock = asyncio.Lock()
     bot_last_error = ""
     recent_notifications: dict[str, float] = {}
@@ -293,6 +294,24 @@ def create_app() -> FastAPI:
                 log.exception("Daily statistics notification failed")
             await asyncio.sleep(3600)
 
+    async def plati_eternal_online_loop() -> None:
+        while True:
+            try:
+                if not plati_eternal_online_enabled():
+                    await asyncio.sleep(60)
+                    continue
+                result = await digiseller.keep_online()
+                now = datetime.now(timezone.utc).isoformat()
+                db.set_setting("plati_eternal_online_last_ok_at", now)
+                db.set_setting("plati_eternal_online_last_result", json.dumps(result, ensure_ascii=False, sort_keys=True))
+                db.set_setting("plati_eternal_online_last_error", "")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                db.set_setting("plati_eternal_online_last_error", str(exc))
+                log_poll_error("plati_eternal_online", "Cannot refresh Plati.Market online status")
+            await asyncio.sleep(plati_eternal_online_interval_seconds())
+
     def message_id(message: dict[str, Any]) -> str:
         for key in ("id", "message_id", "id_d", "id_msg", "id_debate"):
             if message.get(key) not in (None, ""):
@@ -372,6 +391,16 @@ def create_app() -> FastAPI:
 
     def digiseller_unique_code_requests_enabled() -> bool:
         return bool(digiseller_polling_configured() and runtime.get_bool("digiseller_unique_code_request_enabled"))
+
+    def plati_eternal_online_enabled() -> bool:
+        return bool(digiseller_polling_configured() and runtime.get_bool("plati_eternal_online_enabled"))
+
+    def plati_eternal_online_interval_seconds() -> float:
+        try:
+            minutes = runtime.get_float("plati_eternal_online_interval_minutes")
+        except Exception:
+            minutes = 2.0
+        return max(60.0, min(minutes * 60.0, 60 * 60.0))
 
     def digiseller_unique_code_request_delay() -> timedelta:
         try:
@@ -1243,12 +1272,13 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal chat_task, daily_task
+        nonlocal chat_task, daily_task, plati_online_task
         db.init()
         async with bot_lock:
             await start_telegram_bot()
         chat_task = asyncio.create_task(poll_marketplace_chats())
         daily_task = asyncio.create_task(daily_statistics_loop())
+        plati_online_task = asyncio.create_task(plati_eternal_online_loop())
         yield
         if chat_task:
             chat_task.cancel()
@@ -1260,6 +1290,12 @@ def create_app() -> FastAPI:
             daily_task.cancel()
             try:
                 await daily_task
+            except asyncio.CancelledError:
+                pass
+        if plati_online_task:
+            plati_online_task.cancel()
+            try:
+                await plati_online_task
             except asyncio.CancelledError:
                 pass
         async with bot_lock:

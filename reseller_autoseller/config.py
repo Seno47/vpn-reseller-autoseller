@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     free_reissue_enabled: bool = True
     digiseller_unique_code_request_enabled: bool = True
     digiseller_unique_code_request_delay_minutes: float = 5.0
+    plati_eternal_online_enabled: bool = False
+    plati_eternal_online_interval_minutes: float = 2.0
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
