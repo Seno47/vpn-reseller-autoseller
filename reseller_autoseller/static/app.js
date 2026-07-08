@@ -132,7 +132,10 @@ const RU_TO_EN = {
   "Бесплатная команда без ID": "Free command without ID",
   "Бесплатный режим отключён": "Free mode disabled",
   "order_id получен, LTE добавлен": "order_id received, LTE added",
-  "order_id получен, IP-лимит увеличен": "order_id received, IP limit increased"
+  "order_id получен, IP-лимит увеличен": "order_id received, IP limit increased",
+  "Digiseller": "Digiseller",
+  "Запрос уникального кода": "Unique code request",
+  "Покупатель не прислал уникальный код": "Buyer has not sent the unique code"
 };
 
 const textNodeOriginals = new WeakMap();

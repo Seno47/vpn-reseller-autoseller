@@ -116,6 +116,17 @@ ID заказа указан в первой выдаче доступа.""",
 Проверьте ID заказа и попробуйте ещё раз.
 
 Ошибка: {ERROR}""",
+        "request_unique_code": """👋 Здравствуйте! Спасибо за покупку.
+
+🔑 Для автоматической выдачи VPN-доступа пришлите, пожалуйста, уникальный 16-значный код Digiseller в этот чат.
+
+Где найти код:
+1. Откройте страницу оплаченного заказа.
+2. Найдите строку «Уникальный код».
+3. Скопируйте код и отправьте его сюда одним сообщением.
+
+✅ После проверки кода бот сразу отправит VPN-доступ.
+⚠️ Не отправляйте пароли, данные карты и лишние личные данные.""",
     }
 )
 
@@ -150,6 +161,7 @@ ACTION_LABELS.update(
         "status": "Статус подписки",
         "status_help": "Подсказка статуса",
         "status_error": "Ошибка статуса",
+        "request_unique_code": "Запрос уникального кода",
     }
 )
 
@@ -171,6 +183,7 @@ TEMPLATE_CATEGORIES = {
     "status": "Команды",
     "status_help": "Команды",
     "status_error": "Ошибки",
+    "request_unique_code": "Digiseller",
 }
 
 OPERATION_ACTIONS = {"create", "renew", "reissue", "traffic", "ip_limit"}
@@ -197,6 +210,13 @@ TEMPLATE_GROUPS = [
         "label": BASE_ACTION_LABELS["create"],
         "stages": [
             {"key": "create", "stage": "delivered", "label": "Заказ выдан"},
+        ],
+    },
+    {
+        "key": "digiseller",
+        "label": "Digiseller",
+        "stages": [
+            {"key": "request_unique_code", "stage": "waiting_unique_code", "label": "Покупатель не прислал уникальный код"},
         ],
     },
     {
@@ -302,6 +322,13 @@ DELIVERY_TEMPLATE_VARIABLES = {
     "SUBSCRIPTION_URL": "Ссылка подписки",
     "DEVICE_LIMIT": "Лимит устройств / IP",
     "LTE_QUOTA": "LTE-квота",
+    "MARKETPLACE_ORDER_ID": "ID заказа/чата на площадке",
+    "PRODUCT_ID": "ID товара на площадке",
+    "PRODUCT_TITLE": "Название товара на площадке",
+    "BUYER_EMAIL": "Email покупателя",
+    "PURCHASE_AMOUNT": "Сумма покупки",
+    "PURCHASE_CURRENCY": "Валюта покупки",
+    "UNIQUE_CODE_STATE": "Статус уникального кода",
 }
 
 DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
@@ -321,6 +348,13 @@ DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
     "SUBSCRIPTION_URL": "Ссылка подключения к подписке.",
     "DEVICE_LIMIT": "Текущий лимит устройств или IP из ответа API.",
     "LTE_QUOTA": "LTE-квота из ответа API или параметров покупки.",
+    "MARKETPLACE_ORDER_ID": "Номер заказа или чата на Plati.Market/Digiseller/GGsel.",
+    "PRODUCT_ID": "ID купленного товара на площадке.",
+    "PRODUCT_TITLE": "Название купленного товара на площадке, если площадка передала его в API.",
+    "BUYER_EMAIL": "Email покупателя из данных площадки, если он доступен.",
+    "PURCHASE_AMOUNT": "Сумма покупки из данных площадки.",
+    "PURCHASE_CURRENCY": "Валюта покупки из данных площадки.",
+    "UNIQUE_CODE_STATE": "Числовой статус уникального кода Digiseller из purchase/info.",
 }
 
 COMPLEX_VARIABLES_SETTING = "custom_complex_variables"

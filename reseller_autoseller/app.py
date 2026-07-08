@@ -8,7 +8,7 @@ import sqlite3
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,14 @@ from reseller_autoseller.db import Database
 from reseller_autoseller.digiseller_client import (
     DigisellerApiError,
     RuntimeDigisellerClient,
+    purchase_amount,
+    purchase_buyer_email,
+    purchase_currency,
+    purchase_paid_at,
+    purchase_product_id,
+    purchase_variant_id,
     sale_event_from_unique_code,
+    unique_code_state,
 )
 from reseller_autoseller.lot_parser import extract_product_id, is_allowed_lot_url, parse_lot_html
 from reseller_autoseller.marketplaces import SUPPORTED_MARKETPLACES, normalize_sale
@@ -335,6 +342,16 @@ def create_app() -> FastAPI:
     def digiseller_polling_configured() -> bool:
         return bool(runtime.get_text("digiseller_seller_id") and runtime.get_text("digiseller_api_key"))
 
+    def digiseller_unique_code_requests_enabled() -> bool:
+        return bool(digiseller_polling_configured() and runtime.get_bool("digiseller_unique_code_request_enabled"))
+
+    def digiseller_unique_code_request_delay() -> timedelta:
+        try:
+            minutes = runtime.get_float("digiseller_unique_code_request_delay_minutes")
+        except Exception:
+            minutes = 30.0
+        return timedelta(minutes=max(0.0, min(minutes, 24 * 60)))
+
     def marketplace_messages_configured(marketplace: str) -> bool:
         if marketplace in {"plati", "digiseller"}:
             return digiseller_polling_configured()
@@ -370,6 +387,109 @@ def create_app() -> FastAPI:
             if len(normalized) == 16:
                 found.append(normalized)
         return list(dict.fromkeys(found))
+
+    def parse_datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        for candidate in (normalized, normalized.replace(" ", "T", 1)):
+            try:
+                parsed = datetime.fromisoformat(candidate)
+                if parsed.tzinfo is None:
+                    return parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            except ValueError:
+                pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        return None
+
+    def event_created_at(event: dict[str, Any]) -> datetime | None:
+        return parse_datetime(event.get("created_at"))
+
+    def sale_paid_at(sale: dict[str, Any], purchase: dict[str, Any]) -> datetime | None:
+        return parse_datetime(purchase_paid_at(purchase)) or parse_datetime(
+            pick_recursive(sale, "date_pay", "purchase_date", "date", "created_at")
+        )
+
+    def event_recent(events: list[dict[str, Any]], event_types: set[str], delay: timedelta) -> bool:
+        now = datetime.now(timezone.utc)
+        for event in events:
+            if str(event.get("event_type") or "") not in event_types:
+                continue
+            created_at = event_created_at(event)
+            if not created_at or now - created_at < delay:
+                return True
+        return False
+
+    def unique_code_request_context(invoice_id: str, purchase: dict[str, Any], product: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            "marketplace_order_id": invoice_id,
+            "product_id": purchase_product_id(purchase),
+            "product_title": str((product or {}).get("title") or pick_recursive(purchase, "name", "title") or ""),
+            "buyer_email": purchase_buyer_email(purchase),
+            "purchase_amount": purchase_amount(purchase),
+            "purchase_currency": purchase_currency(purchase),
+            "unique_code_state": str(unique_code_state(purchase) or ""),
+        }
+
+    def mapped_plati_product(purchase: dict[str, Any]) -> dict[str, Any] | None:
+        product_id = purchase_product_id(purchase)
+        if not product_id:
+            return None
+        return db.get_product_by_external("plati", product_id, purchase_variant_id(purchase))
+
+    def is_paid_digiseller_purchase(purchase: dict[str, Any]) -> bool:
+        invoice_state = pick_recursive(purchase, "invoice_state")
+        if not invoice_state:
+            return True
+        try:
+            return int(invoice_state) == 3
+        except ValueError:
+            return False
+
+    def should_request_unique_code(invoice_id: str, sale: dict[str, Any], purchase: dict[str, Any]) -> tuple[bool, str]:
+        if not is_paid_digiseller_purchase(purchase):
+            return False, "invoice is not paid"
+        if unique_code_state(purchase) != 1:
+            return False, "unique code state is not waiting for verification"
+        if db.digiseller_invoice_has_delivery(invoice_id):
+            return False, "invoice already has saved delivery"
+        product = mapped_plati_product(purchase)
+        if not product:
+            return False, "mapped product was not found"
+        if not int(product.get("enabled", 0)):
+            return False, "mapped product is disabled"
+        paid_at = sale_paid_at(sale, purchase)
+        now = datetime.now(timezone.utc)
+        if paid_at:
+            age = now - paid_at
+            if age < digiseller_unique_code_request_delay():
+                return False, "payment is too recent"
+            if age > timedelta(hours=72):
+                return False, "payment is older than reminder window"
+        events = db.list_order_events(marketplace="plati", external_order_id=invoice_id, limit=50)
+        if any(str(event.get("event_type") or "") == "unique_code_request_sent" and str(event.get("status") or "") == "success" for event in events):
+            return False, "request was already sent"
+        retry_delay = max(digiseller_unique_code_request_delay(), timedelta(minutes=30))
+        if event_recent(events, {"unique_code_request_failed"}, retry_delay):
+            return False, "request failed recently"
+        if not paid_at:
+            if event_recent(events, {"unique_code_request_candidate_seen"}, digiseller_unique_code_request_delay()):
+                return False, "candidate was seen recently"
+            if not any(str(event.get("event_type") or "") == "unique_code_request_candidate_seen" for event in events):
+                db.add_order_event(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    event_type="unique_code_request_candidate_seen",
+                    payload={"product_id": purchase_product_id(purchase), "variant_id": purchase_variant_id(purchase)},
+                )
+                return False, "candidate was recorded for delayed request"
+        return True, "ok"
 
     async def process_unique_code_message(invoice_id: str, code: str) -> bool:
         db.add_order_event(
@@ -650,6 +770,78 @@ def create_app() -> FastAPI:
                 except Exception:
                     log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
 
+    async def poll_digiseller_unclaimed_unique_code_sales() -> None:
+        if not digiseller_unique_code_requests_enabled():
+            return
+        try:
+            sales = await digiseller.last_sales(top=100)
+        except Exception:
+            log_poll_error("digiseller_last_sales", "Cannot read Digiseller last sales")
+            return
+        if not sales:
+            return
+        for sale in sales:
+            invoice_id = pick_recursive(sale, "inv", "id_i", "invoice_id", "invoice", "order_id")
+            if not invoice_id:
+                continue
+            try:
+                purchase = await digiseller.purchase_info(invoice_id)
+            except Exception:
+                log_poll_error("digiseller_purchase_info", f"Cannot read Digiseller purchase info for {invoice_id}")
+                continue
+            if not purchase_product_id(purchase):
+                content = dict(purchase.get("content") if isinstance(purchase.get("content"), dict) else {})
+                product_id = pick_recursive(sale, "id_goods", "item_id", "product_id", "goods_id")
+                if product_id:
+                    content["item_id"] = product_id
+                purchase = {**purchase, "content": content}
+            should_send, reason = should_request_unique_code(invoice_id, sale, purchase)
+            if not should_send:
+                if reason not in {
+                    "unique code state is not waiting for verification",
+                    "mapped product was not found",
+                    "payment is too recent",
+                    "request was already sent",
+                }:
+                    log.debug("Skip Digiseller unique-code request for %s: %s", invoice_id, reason)
+                continue
+            product = mapped_plati_product(purchase)
+            text = delivery_service.render_system_text(
+                "request_unique_code",
+                unique_code_request_context(invoice_id, purchase, product),
+            )
+            if await messenger.send_message("plati", invoice_id, text):
+                db.add_order_event(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    event_type="unique_code_request_sent",
+                    status="success",
+                    payload={
+                        "product_id": purchase_product_id(purchase),
+                        "variant_id": purchase_variant_id(purchase),
+                        "unique_code_state": unique_code_state(purchase),
+                    },
+                )
+                notify_admins(
+                    f"📨 <b>{tr('Запрошен уникальный код Digiseller', 'Digiseller unique code requested')}</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
+                    f"{tr('Товар', 'Product')}: <code>{escape(purchase_product_id(purchase))}</code>",
+                    kind="pending",
+                )
+            else:
+                db.add_order_event(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    event_type="unique_code_request_failed",
+                    status="error",
+                    message="Cannot send unique code request to Digiseller chat",
+                    payload={
+                        "product_id": purchase_product_id(purchase),
+                        "variant_id": purchase_variant_id(purchase),
+                        "unique_code_state": unique_code_state(purchase),
+                    },
+                )
+
     async def poll_ggsel_sales() -> None:
         if not ggsel.configured_for_polling():
             return
@@ -716,6 +908,7 @@ def create_app() -> FastAPI:
         while True:
             try:
                 await poll_digiseller_unique_code_chats()
+                await poll_digiseller_unclaimed_unique_code_sales()
                 await poll_ggsel_sales()
                 for operation in db.list_pending_operations():
                     if not marketplace_messages_configured(str(operation["marketplace"])):
@@ -1164,7 +1357,7 @@ def create_app() -> FastAPI:
     @app.put("/admin/api/chat-command/{action}", dependencies=[Depends(require_admin)])
     async def admin_chat_command_update(action: str, payload: ChatCommandIn) -> dict[str, Any]:
         action = action.strip().lower()
-        if action not in {"renew", "reissue", "traffic", "ip_limit"}:
+        if action not in {"renew", "reissue", "traffic", "ip_limit", "status"}:
             raise HTTPException(status_code=404, detail="Unknown command action")
         try:
             command = delivery_service.set_expected_command(action, payload.command)

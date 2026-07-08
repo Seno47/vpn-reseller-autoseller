@@ -76,6 +76,39 @@ class DigisellerClient:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot mark code delivered"))
         return data
 
+    async def last_sales(self, *, top: int = 100, group: str = "") -> list[dict[str, Any]]:
+        token = await self.token()
+        params: dict[str, Any] = {
+            "seller_id": self.seller_id,
+            "top": max(1, min(int(top), 1000)),
+            "token": token,
+        }
+        if group:
+            params["group"] = group
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(
+                f"{self.base_url}/seller-last-sales",
+                params=params,
+                headers={"Accept": "application/json"},
+            )
+        data = self._json_any(response)
+        if isinstance(data, dict) and int(data.get("retval", 0)) != 0:
+            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read last sales"))
+        return self._list_from_response(data)
+
+    async def purchase_info(self, invoice_id: str) -> dict[str, Any]:
+        token = await self.token()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(
+                f"{self.base_url}/purchase/info/{invoice_id}",
+                params={"token": token},
+                headers={"Accept": "application/json"},
+            )
+        data = self._json(response)
+        if int(data.get("retval", -1)) != 0:
+            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read purchase info"))
+        return data
+
     async def order_chats(self, *, filter_new: bool = True, page: int = 1, rows: int = 100) -> list[dict[str, Any]]:
         token = await self.token()
         params: dict[str, Any] = {
@@ -186,6 +219,22 @@ class DigisellerClient:
         except ValueError as exc:
             raise DigisellerApiError("Digiseller API returned invalid JSON") from exc
 
+    @staticmethod
+    def _list_from_response(data: Any) -> list[dict[str, Any]]:
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if not isinstance(data, dict):
+            return []
+        for key in ("items", "sales", "rows", "list", "data", "content", "result"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = DigisellerClient._list_from_response(value)
+                if nested:
+                    return nested
+        return []
+
 
 class RuntimeDigisellerClient:
     def __init__(self, runtime: Any) -> None:
@@ -213,6 +262,12 @@ class RuntimeDigisellerClient:
 
     async def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]:
         return await self.client().mark_unique_code_delivered(unique_code)
+
+    async def last_sales(self, *, top: int = 100, group: str = "") -> list[dict[str, Any]]:
+        return await self.client().last_sales(top=top, group=group)
+
+    async def purchase_info(self, invoice_id: str) -> dict[str, Any]:
+        return await self.client().purchase_info(invoice_id)
 
     async def order_chats(self, *, filter_new: bool = True, page: int = 1, rows: int = 100) -> list[dict[str, Any]]:
         return await self.client().order_chats(filter_new=filter_new, page=page, rows=rows)
@@ -260,8 +315,76 @@ def sale_event_from_unique_code(purchase: dict[str, Any], unique_code: str = "")
 
 
 def unique_code_state(purchase: dict[str, Any]) -> int | None:
-    state = (purchase.get("unique_code_state") or {}).get("state")
+    content = purchase_content(purchase)
+    state = (content.get("unique_code_state") or {}).get("state")
     try:
         return int(state)
     except (TypeError, ValueError):
         return None
+
+
+def purchase_content(purchase: dict[str, Any]) -> dict[str, Any]:
+    content = purchase.get("content")
+    return content if isinstance(content, dict) else purchase
+
+
+def purchase_invoice_id(purchase: dict[str, Any], fallback: str = "") -> str:
+    content = purchase_content(purchase)
+    for source in (purchase, content):
+        for key in ("inv", "id_i", "invoice_id", "invoice", "order_id"):
+            if source.get(key) not in (None, ""):
+                return str(source[key]).strip()
+    return str(fallback or "").strip()
+
+
+def purchase_product_id(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    for key in ("id_goods", "item_id", "product_id", "goods_id"):
+        if content.get(key) not in (None, ""):
+            return str(content[key]).strip()
+    return ""
+
+
+def purchase_variant_id(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    options = content.get("options") if isinstance(content.get("options"), list) else []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        for key in ("variant_id", "user_data_id", "id"):
+            if option.get(key) not in (None, ""):
+                return str(option[key]).strip()
+    return ""
+
+
+def purchase_buyer_email(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    buyer = content.get("buyer_info") if isinstance(content.get("buyer_info"), dict) else {}
+    for source in (content, buyer):
+        if source.get("email") not in (None, ""):
+            return str(source["email"]).strip()
+    return ""
+
+
+def purchase_amount(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    for key in ("amount", "amount_usd"):
+        if content.get(key) not in (None, ""):
+            return str(content[key]).strip()
+    return ""
+
+
+def purchase_currency(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    for key in ("type_curr", "currency", "currency_type"):
+        if content.get(key) not in (None, ""):
+            return str(content[key]).strip()
+    return ""
+
+
+def purchase_paid_at(purchase: dict[str, Any]) -> str:
+    content = purchase_content(purchase)
+    for key in ("date_pay", "purchase_date", "date", "created_at"):
+        if content.get(key) not in (None, ""):
+            return str(content[key]).strip()
+    return ""

@@ -375,6 +375,24 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def digiseller_invoice_has_delivery(self, invoice_id: str) -> bool:
+        invoice = str(invoice_id or "").strip()
+        if not invoice:
+            return False
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM sales s
+                JOIN deliveries d ON d.sale_id = s.id
+                WHERE s.marketplace IN ('plati', 'digiseller')
+                  AND (s.external_order_id=? OR s.external_order_id LIKE ?)
+                LIMIT 1
+                """,
+                (invoice, f"{invoice}:%"),
+            ).fetchone()
+            return row is not None
+
     def create_sale(self, event: Any) -> dict[str, Any]:
         with self.connect() as conn:
             conn.execute(

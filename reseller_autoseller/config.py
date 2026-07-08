@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     notify_pending: bool = True
     notify_daily_statistics: bool = False
     free_reissue_enabled: bool = True
+    digiseller_unique_code_request_enabled: bool = True
+    digiseller_unique_code_request_delay_minutes: float = 30.0
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(

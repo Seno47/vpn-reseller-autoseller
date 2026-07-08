@@ -164,6 +164,24 @@ class AdminSecurityTests(unittest.TestCase):
             self.assertEqual(en_labels["panel_language"], "Interface language")
             self.assertEqual(en_labels["enable_telegram"], "Telegram enabled")
 
+    def test_status_chat_command_can_be_updated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            response = client.put(
+                "/admin/api/chat-command/status",
+                headers=headers,
+                json={"command": "!info"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["command"], "!info")
+
 
 if __name__ == "__main__":
     unittest.main()

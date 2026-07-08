@@ -138,6 +138,12 @@ class DeliveryServiceTests(unittest.TestCase):
         self.assertNotIn("command_action", group)
         self.assertEqual([stage["key"] for stage in group["stages"]], ["create"])
 
+    def test_digiseller_template_group_has_unique_code_request(self) -> None:
+        group = next(item for item in TEMPLATE_GROUPS if item["key"] == "digiseller")
+
+        self.assertNotIn("command_action", group)
+        self.assertEqual([stage["key"] for stage in group["stages"]], ["request_unique_code"])
+
     def test_reissue_template_group_owns_free_reissue_templates(self) -> None:
         group = next(item for item in TEMPLATE_GROUPS if item["key"] == "reissue")
         stage_keys = {stage["key"] for stage in group["stages"]}
