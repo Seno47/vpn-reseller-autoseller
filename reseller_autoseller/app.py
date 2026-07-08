@@ -78,6 +78,7 @@ MIN_ADMIN_PASSWORD_LENGTH = 8
 ADMIN_SESSION_TTL_SECONDS = 24 * 60 * 60
 LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
+DIGISELLER_NAIVE_DATETIME_ZONE = timezone(timedelta(hours=3), "MSK")
 
 
 class ProductMappingIn(BaseModel):
@@ -397,13 +398,13 @@ def create_app() -> FastAPI:
             try:
                 parsed = datetime.fromisoformat(candidate)
                 if parsed.tzinfo is None:
-                    return parsed.replace(tzinfo=timezone.utc)
+                    return parsed.replace(tzinfo=DIGISELLER_NAIVE_DATETIME_ZONE).astimezone(timezone.utc)
                 return parsed.astimezone(timezone.utc)
             except ValueError:
                 pass
         for fmt in ("%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d"):
             try:
-                return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+                return datetime.strptime(text, fmt).replace(tzinfo=DIGISELLER_NAIVE_DATETIME_ZONE).astimezone(timezone.utc)
             except ValueError:
                 pass
         return None
@@ -442,6 +443,21 @@ def create_app() -> FastAPI:
         if not product_id:
             return None
         return db.get_product_by_external("plati", product_id, purchase_variant_id(purchase))
+
+    def mapped_plati_product_ids() -> list[int]:
+        result: list[int] = []
+        seen: set[int] = set()
+        for product in db.list_products():
+            if str(product.get("marketplace") or "") != "plati" or not int(product.get("enabled", 0)):
+                continue
+            try:
+                product_id = int(str(product.get("external_product_id") or "").strip())
+            except ValueError:
+                continue
+            if product_id not in seen:
+                result.append(product_id)
+                seen.add(product_id)
+        return result
 
     def is_paid_digiseller_purchase(purchase: dict[str, Any]) -> bool:
         invoice_state = pick_recursive(purchase, "invoice_state")
@@ -773,10 +789,17 @@ def create_app() -> FastAPI:
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
         if not digiseller_unique_code_requests_enabled():
             return
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(hours=72)
         try:
-            sales = await digiseller.last_sales(top=100)
+            sales = await digiseller.seller_sales(
+                date_start=start.strftime("%Y-%m-%d %H:%M:%S"),
+                date_finish=now.strftime("%Y-%m-%d %H:%M:%S"),
+                product_ids=mapped_plati_product_ids(),
+                rows=100,
+            )
         except Exception:
-            log_poll_error("digiseller_last_sales", "Cannot read Digiseller last sales")
+            log_poll_error("digiseller_seller_sales", "Cannot read Digiseller seller sales")
             return
         if not sales:
             return

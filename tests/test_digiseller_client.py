@@ -1,6 +1,7 @@
 import unittest
 
 from reseller_autoseller.digiseller_client import (
+    DigisellerClient,
     purchase_amount,
     purchase_buyer_email,
     purchase_currency,
@@ -71,6 +72,11 @@ class DigisellerClientTests(unittest.TestCase):
         self.assertEqual(purchase_amount(purchase), "299.00")
         self.assertEqual(purchase_currency(purchase), "RUB")
         self.assertEqual(purchase_paid_at(purchase), "2026-07-08 12:30:00")
+
+    def test_reads_rows_list_from_seller_sales_response(self) -> None:
+        rows = DigisellerClient._list_from_response({"retval": 0, "rows": [{"invoice_id": 123}]})
+
+        self.assertEqual(rows, [{"invoice_id": 123}])
 
 
 if __name__ == "__main__":

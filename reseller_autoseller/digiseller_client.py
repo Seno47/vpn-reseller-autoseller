@@ -96,6 +96,38 @@ class DigisellerClient:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read last sales"))
         return self._list_from_response(data)
 
+    async def seller_sales(
+        self,
+        *,
+        date_start: str,
+        date_finish: str,
+        product_ids: list[int] | None = None,
+        returned: int = 1,
+        page: int = 1,
+        rows: int = 100,
+    ) -> list[dict[str, Any]]:
+        token = await self.token()
+        payload: dict[str, Any] = {
+            "date_start": date_start,
+            "date_finish": date_finish,
+            "returned": returned,
+            "page": max(1, int(page)),
+            "rows": max(1, min(int(rows), 5000)),
+        }
+        if product_ids:
+            payload["product_ids"] = product_ids
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/seller-sells/v2",
+                params={"token": token},
+                json=payload,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+        data = self._json_any(response)
+        if isinstance(data, dict) and int(data.get("retval", 0)) != 0:
+            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read seller sales"))
+        return self._list_from_response(data)
+
     async def purchase_info(self, invoice_id: str) -> dict[str, Any]:
         token = await self.token()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -265,6 +297,25 @@ class RuntimeDigisellerClient:
 
     async def last_sales(self, *, top: int = 100, group: str = "") -> list[dict[str, Any]]:
         return await self.client().last_sales(top=top, group=group)
+
+    async def seller_sales(
+        self,
+        *,
+        date_start: str,
+        date_finish: str,
+        product_ids: list[int] | None = None,
+        returned: int = 1,
+        page: int = 1,
+        rows: int = 100,
+    ) -> list[dict[str, Any]]:
+        return await self.client().seller_sales(
+            date_start=date_start,
+            date_finish=date_finish,
+            product_ids=product_ids,
+            returned=returned,
+            page=page,
+            rows=rows,
+        )
 
     async def purchase_info(self, invoice_id: str) -> dict[str, Any]:
         return await self.client().purchase_info(invoice_id)
