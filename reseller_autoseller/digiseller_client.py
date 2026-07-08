@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from typing import Any
@@ -14,6 +15,8 @@ class DigisellerApiError(RuntimeError):
 
 
 class DigisellerClient:
+    _last_login_timestamp = 0
+
     def __init__(
         self,
         *,
@@ -29,26 +32,38 @@ class DigisellerClient:
         self._token: str | None = None
         self._token_valid_until = 0.0
 
+    @classmethod
+    def _next_login_timestamp(cls) -> int:
+        timestamp = max(int(time.time()), cls._last_login_timestamp + 1)
+        cls._last_login_timestamp = timestamp
+        return timestamp
+
     async def token(self) -> str:
         if self._token and time.time() < self._token_valid_until:
             return self._token
         if not self.seller_id or not self.api_key:
             raise DigisellerApiError("Digiseller seller ID/API key are not configured")
-        timestamp = int(time.time())
-        sign = hashlib.sha256(f"{self.api_key}{timestamp}".encode("utf-8")).hexdigest()
-        payload = {"seller_id": int(self.seller_id), "timestamp": timestamp, "sign": sign}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/apilogin",
-                json=payload,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-        data = self._json(response)
-        if int(data.get("retval", -1)) != 0 or not data.get("token"):
-            raise DigisellerApiError(str(data.get("desc") or data.get("retdesc") or "Digiseller login failed"))
-        self._token = str(data["token"])
-        self._token_valid_until = time.time() + 110 * 60
-        return self._token
+        last_error = "Digiseller login failed"
+        for attempt in range(3):
+            timestamp = self._next_login_timestamp()
+            sign = hashlib.sha256(f"{self.api_key}{timestamp}".encode("utf-8")).hexdigest()
+            payload = {"seller_id": int(self.seller_id), "timestamp": timestamp, "sign": sign}
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/apilogin",
+                    json=payload,
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                )
+            data = self._json(response)
+            if int(data.get("retval", -1)) == 0 and data.get("token"):
+                self._token = str(data["token"])
+                self._token_valid_until = time.time() + 110 * 60
+                return self._token
+            last_error = str(data.get("desc") or data.get("retdesc") or "Digiseller login failed")
+            if "timestamp" not in last_error.lower() or attempt == 2:
+                break
+            await asyncio.sleep(1.1)
+        raise DigisellerApiError(last_error)
 
     async def purchase_by_unique_code(self, unique_code: str) -> dict[str, Any]:
         token = await self.token()
