@@ -377,7 +377,7 @@ def create_app() -> FastAPI:
         try:
             minutes = runtime.get_float("digiseller_unique_code_request_delay_minutes")
         except Exception:
-            minutes = 15.0
+            minutes = 5.0
         return timedelta(minutes=max(0.0, min(minutes, 24 * 60)))
 
     def marketplace_messages_configured(marketplace: str) -> bool:
