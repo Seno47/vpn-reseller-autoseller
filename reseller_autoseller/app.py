@@ -168,6 +168,7 @@ def create_app() -> FastAPI:
     poll_error_notifications: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
     admin_sessions: dict[str, float] = {}
+    digiseller_api_backoff_until = 0.0
 
     def notify_admins(text: str, kind: str = "errors") -> None:
         setting_key = f"notify_{kind}"
@@ -387,7 +388,18 @@ def create_app() -> FastAPI:
             return ggsel.configured_for_polling()
         return False
 
-    def log_poll_error(key: str, message: str) -> None:
+    def digiseller_api_paused() -> bool:
+        return time.monotonic() < digiseller_api_backoff_until
+
+    def note_digiseller_api_error(exc: Exception) -> None:
+        nonlocal digiseller_api_backoff_until
+        text = str(exc).lower()
+        if "quota exceeded" in text or "слишком много запросов" in text:
+            digiseller_api_backoff_until = max(digiseller_api_backoff_until, time.monotonic() + 60 * 60)
+
+    def log_poll_error(key: str, message: str, exc: Exception | None = None) -> None:
+        if exc is not None and key.startswith("digiseller"):
+            note_digiseller_api_error(exc)
         now = time.monotonic()
         last = poll_error_notifications.get(key, 0)
         if now - last < 300:
@@ -790,6 +802,8 @@ def create_app() -> FastAPI:
             return True
 
     async def process_digiseller_chat_messages(invoice_id: str) -> bool:
+        if digiseller_api_paused():
+            return False
         last_seen = db.get_chat_cursor("plati", invoice_id)
         try:
             messages = await digiseller.order_messages(
@@ -798,14 +812,14 @@ def create_app() -> FastAPI:
                 newer=bool(last_seen),
                 old_id=last_seen,
             )
-        except Exception:
-            log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}")
+        except Exception as exc:
+            log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}", exc)
             return False
         if not messages and last_seen:
             try:
                 await digiseller.mark_order_messages_seen(invoice_id)
-            except Exception:
-                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+            except Exception as exc:
+                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}", exc)
             return False
         cursor_to_save = last_seen
         handled = False
@@ -847,18 +861,18 @@ def create_app() -> FastAPI:
         if handled:
             try:
                 await digiseller.mark_order_messages_seen(invoice_id)
-            except Exception:
-                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}")
+            except Exception as exc:
+                log_poll_error("digiseller_seen", f"Cannot mark Digiseller chat as seen for {invoice_id}", exc)
         return handled
 
     async def poll_digiseller_unique_code_chats() -> None:
-        if not digiseller_polling_configured():
+        if not digiseller_polling_configured() or digiseller_api_paused():
             return
         seen_invoice_ids: set[str] = set()
         try:
             chats = await digiseller.order_chats(filter_new=True, rows=100)
-        except Exception:
-            log_poll_error("digiseller_chats", "Cannot read Digiseller unread chats")
+        except Exception as exc:
+            log_poll_error("digiseller_chats", "Cannot read Digiseller unread chats", exc)
             chats = []
         for chat in chats:
             invoice_id = chat_invoice_id(chat)
@@ -873,7 +887,7 @@ def create_app() -> FastAPI:
             await process_digiseller_chat_messages(invoice_id)
 
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
-        if not digiseller_unique_code_requests_enabled():
+        if not digiseller_unique_code_requests_enabled() or digiseller_api_paused():
             return
         now = datetime.now(DIGISELLER_NAIVE_DATETIME_ZONE)
         start = now - timedelta(hours=72)
@@ -884,8 +898,8 @@ def create_app() -> FastAPI:
                 product_ids=mapped_plati_product_ids(),
                 rows=100,
             )
-        except Exception:
-            log_poll_error("digiseller_seller_sales", "Cannot read Digiseller seller sales")
+        except Exception as exc:
+            log_poll_error("digiseller_seller_sales", "Cannot read Digiseller seller sales", exc)
             return
         if not sales:
             return
@@ -893,10 +907,12 @@ def create_app() -> FastAPI:
             invoice_id = pick_recursive(sale, "inv", "id_i", "invoice_id", "invoice", "order_id")
             if not invoice_id:
                 continue
+            if db.digiseller_invoice_has_delivery(invoice_id):
+                continue
             try:
                 purchase = await digiseller.purchase_info(invoice_id)
-            except Exception:
-                log_poll_error("digiseller_purchase_info", f"Cannot read Digiseller purchase info for {invoice_id}")
+            except Exception as exc:
+                log_poll_error("digiseller_purchase_info", f"Cannot read Digiseller purchase info for {invoice_id}", exc)
                 continue
             if not purchase_product_id(purchase):
                 content = dict(purchase.get("content") if isinstance(purchase.get("content"), dict) else {})
@@ -904,6 +920,16 @@ def create_app() -> FastAPI:
                 if product_id:
                     content["item_id"] = product_id
                 purchase = {**purchase, "content": content}
+            product = mapped_plati_product(purchase)
+            if (
+                is_paid_digiseller_purchase(purchase)
+                and unique_code_state(purchase) == 1
+                and not db.digiseller_invoice_has_delivery(invoice_id)
+                and product
+                and int(product.get("enabled", 0))
+                and await process_digiseller_chat_messages(invoice_id)
+            ):
+                continue
             should_send, reason = should_request_unique_code(invoice_id, sale, purchase)
             if not should_send:
                 if reason not in {
@@ -914,7 +940,6 @@ def create_app() -> FastAPI:
                 }:
                     log.debug("Skip Digiseller unique-code request for %s: %s", invoice_id, reason)
                 continue
-            product = mapped_plati_product(purchase)
             text = delivery_service.render_system_text(
                 "request_unique_code",
                 unique_code_request_context(invoice_id, purchase, product),
@@ -1014,13 +1039,19 @@ def create_app() -> FastAPI:
         db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
 
     async def poll_marketplace_chats() -> None:
+        last_unclaimed_unique_code_poll = 0.0
         while True:
             try:
                 await poll_digiseller_unique_code_chats()
-                await poll_digiseller_unclaimed_unique_code_sales()
+                now_monotonic = time.monotonic()
+                if now_monotonic - last_unclaimed_unique_code_poll >= 60:
+                    last_unclaimed_unique_code_poll = now_monotonic
+                    await poll_digiseller_unclaimed_unique_code_sales()
                 await poll_ggsel_sales()
                 for operation in db.list_pending_operations():
                     if not marketplace_messages_configured(str(operation["marketplace"])):
+                        continue
+                    if str(operation["marketplace"]) in {"plati", "digiseller"} and digiseller_api_paused():
                         continue
                     messages = await messenger.order_messages(
                         str(operation["marketplace"]),
