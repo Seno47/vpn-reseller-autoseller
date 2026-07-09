@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import secrets
@@ -21,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from reseller_autoseller import __version__
 from reseller_autoseller.config import get_settings
 from reseller_autoseller.db import Database
 from reseller_autoseller.digiseller_client import (
@@ -60,6 +62,7 @@ from reseller_autoseller.services import (
 from reseller_autoseller.statistics import build_sales_statistics
 from reseller_autoseller.system_metrics import collect_system_metrics
 from reseller_autoseller.telegram_bot import run_bot
+from reseller_autoseller.updates import UpdateManager
 from reseller_autoseller.xyra_client import XyraNetApiError
 
 
@@ -150,6 +153,7 @@ def create_app() -> FastAPI:
     xyranet = RuntimeXyraNetClient(runtime)
     digiseller = RuntimeDigisellerClient(runtime)
     ggsel = RuntimeGgselClient(runtime)
+    update_manager = UpdateManager(settings=settings, db=db)
     messenger = MarketplaceMessenger(
         digiseller=digiseller,
         ggsel=ggsel,
@@ -163,6 +167,7 @@ def create_app() -> FastAPI:
     bot_task: asyncio.Task[Any] | None = None
     chat_task: asyncio.Task[Any] | None = None
     daily_task: asyncio.Task[Any] | None = None
+    update_check_task: asyncio.Task[Any] | None = None
     bot_lock = asyncio.Lock()
     bot_last_error = ""
     recent_notifications: dict[str, float] = {}
@@ -296,6 +301,17 @@ def create_app() -> FastAPI:
                 raise
             except Exception:
                 log.exception("Daily statistics notification failed")
+            await asyncio.sleep(3600)
+
+    async def update_check_loop() -> None:
+        await asyncio.sleep(10)
+        while True:
+            try:
+                await update_manager.check(force=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Update check failed")
             await asyncio.sleep(3600)
 
     def message_id(message: dict[str, Any]) -> str:
@@ -1432,6 +1448,8 @@ def create_app() -> FastAPI:
                         digiseller=digiseller,
                         runtime=runtime,
                         restart_bot=restart_telegram_bot,
+                        check_updates=lambda force=True: update_manager.check(force=force),
+                        start_update=update_manager.start_update,
                     )
                     bot_last_error = ""
                     delay = 5
@@ -1463,12 +1481,13 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal chat_task, daily_task
+        nonlocal chat_task, daily_task, update_check_task
         db.init()
         async with bot_lock:
             await start_telegram_bot()
         chat_task = asyncio.create_task(poll_marketplace_chats())
         daily_task = asyncio.create_task(daily_statistics_loop())
+        update_check_task = asyncio.create_task(update_check_loop())
         yield
         if chat_task:
             chat_task.cancel()
@@ -1482,10 +1501,16 @@ def create_app() -> FastAPI:
                 await daily_task
             except asyncio.CancelledError:
                 pass
+        if update_check_task:
+            update_check_task.cancel()
+            try:
+                await update_check_task
+            except asyncio.CancelledError:
+                pass
         async with bot_lock:
             await stop_telegram_bot()
 
-    app = FastAPI(title="XyraNet Reseller Autoseller", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="XyraNet Reseller Autoseller", version=__version__, lifespan=lifespan)
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -1554,6 +1579,13 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"status": "ok"}
+
+    @app.get("/version")
+    async def version() -> dict[str, Any]:
+        return {
+            "version": __version__,
+            "commit": os.environ.get("APP_UPDATE_CURRENT_COMMIT", ""),
+        }
 
     @app.api_route("/api/digiseller/notify/sale/{secret}", methods=["GET", "POST"])
     async def digiseller_sale_notification(secret: str, request: Request) -> dict[str, Any]:
@@ -1746,6 +1778,21 @@ def create_app() -> FastAPI:
     @app.get("/admin/api/system", dependencies=[Depends(require_admin)])
     async def admin_system_metrics() -> dict[str, Any]:
         return collect_system_metrics(settings.database_file.parent)
+
+    @app.get("/admin/api/update", dependencies=[Depends(require_admin)])
+    async def admin_update_status() -> dict[str, Any]:
+        return update_manager.status()
+
+    @app.post("/admin/api/update/check", dependencies=[Depends(require_admin)])
+    async def admin_update_check() -> dict[str, Any]:
+        return await update_manager.check(force=True)
+
+    @app.post("/admin/api/update/start", dependencies=[Depends(require_admin)])
+    async def admin_update_start() -> dict[str, Any]:
+        try:
+            return update_manager.start_update()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/admin/api/summary", dependencies=[Depends(require_admin)])
     async def admin_summary() -> Any:

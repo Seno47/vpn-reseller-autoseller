@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>XyraNet Reseller</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260704-5">
+  <link rel="stylesheet" href="/static/styles.css?v=20260709-update-1">
 </head>
 <body>
   <section class="login-screen" id="loginScreen">
@@ -316,6 +316,18 @@
     <section class="app-section" data-section="diagnostics">
       <section class="panel">
         <div class="panel-head">
+          <h2>Обновления</h2>
+          <div class="panel-actions">
+            <button class="secondary" id="checkUpdateButton" type="button">Проверить обновление</button>
+            <button id="startUpdateButton" type="button" disabled>Обновить</button>
+          </div>
+        </div>
+        <div class="update-grid" id="updateStatus"></div>
+        <p class="notice" id="updateNotice"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
           <h2>Проверки и бэкап</h2>
           <div class="panel-actions">
             <button class="secondary" data-smoke-test="xyranet" type="button">XyraNet API</button>
@@ -376,6 +388,6 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=20260704-8"></script>
+  <script src="/static/app.js?v=20260709-update-1"></script>
 </body>
 </html>

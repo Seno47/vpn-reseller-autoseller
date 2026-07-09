@@ -16,6 +16,8 @@ const RU_TO_EN = {
   "Диагностика": "Diagnostics",
   "Настройки": "Settings",
   "Продажи": "Sales",
+  "Обновления": "Updates",
+  "Проверить обновление": "Check for updates",
   "Новый / редактируемый маппинг": "New / editable mapping",
   "Ссылка / данные лота": "Lot link / data",
   "Распарсить": "Parse",
@@ -270,6 +272,10 @@ const smokeTestStatus = document.querySelector("#smokeTestStatus");
 const backupDatabaseButton = document.querySelector("#backupDatabaseButton");
 const systemMetrics = document.querySelector("#systemMetrics");
 const refreshSystemButton = document.querySelector("#refreshSystemButton");
+const updateStatus = document.querySelector("#updateStatus");
+const updateNotice = document.querySelector("#updateNotice");
+const checkUpdateButton = document.querySelector("#checkUpdateButton");
+const startUpdateButton = document.querySelector("#startUpdateButton");
 const actionParamsField = document.querySelector("#actionParamsField");
 const actionParamsTitle = document.querySelector("#actionParamsTitle");
 const actionParamAmountField = document.querySelector("#actionParamAmountField");
@@ -294,6 +300,7 @@ let editingComplexVariableKey = "";
 let statisticsData = null;
 let pendingRows = [];
 let orderEventRows = [];
+let updateData = null;
 
 setLanguage(currentLanguage);
 
@@ -737,6 +744,36 @@ function renderSystemMetrics(system) {
       <small>${escapeHtml(detail)}</small>
     </article>
   `).join("");
+}
+
+function renderUpdateStatus(data) {
+  if (!updateStatus) {
+    return;
+  }
+  updateData = data || {};
+  const hostStatus = updateData.host_status || {};
+  const available = Boolean(updateData.update_available);
+  const supported = Boolean(updateData.update_supported);
+  const statusLabel = available
+    ? t("Доступно обновление", "Update available")
+    : t("Актуальная версия", "Current version");
+  const rows = [
+    [t("Текущая версия", "Current version"), updateData.current_version || "unknown", updateData.current_commit ? `commit ${updateData.current_commit}` : ""],
+    [t("Последняя версия", "Latest version"), updateData.latest_version || updateData.latest_commit || "n/a", updateData.source || ""],
+    [t("Проверено", "Checked"), updateData.checked_at || "n/a", updateData.error || ""],
+    [t("Updater", "Updater"), supported ? t("настроен", "configured") : t("не настроен", "not configured"), hostStatus.status ? `${hostStatus.status}: ${hostStatus.message || hostStatus.stage || ""}` : ""],
+  ];
+  updateStatus.innerHTML = rows.map(([label, value, detail]) => `
+    <article class="system-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </article>
+  `).join("");
+  updateNotice.textContent = updateData.error
+    ? `${t("Ошибка проверки", "Check error")}: ${updateData.error}`
+    : statusLabel;
+  startUpdateButton.disabled = !(supported && available);
 }
 
 function moneyText(value, currency = "₽") {
@@ -1648,9 +1685,10 @@ async function loadAll() {
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
     const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
-    const [status, systemConfig, productsRows, salesRows, settingsRows, notificationUrls, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
+    const [status, systemConfig, updateConfig, productsRows, salesRows, settingsRows, notificationUrls, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
       api("/admin/api/status"),
       api("/admin/api/system").catch(() => null),
+      api("/admin/api/update").catch(() => null),
       api("/admin/api/products"),
       api("/admin/api/sales"),
       api("/admin/api/settings"),
@@ -1676,6 +1714,7 @@ async function loadAll() {
     }
     renderMetrics(status, summary, systemConfig);
     renderSystemMetrics(systemConfig);
+    renderUpdateStatus(updateConfig);
     renderProducts();
     renderSales(salesRows);
     renderSettings(settingsRows);
@@ -1792,6 +1831,33 @@ refreshSystemButton?.addEventListener("click", async () => {
     renderMetrics(status, summary, systemConfig);
   } catch (error) {
     renderSystemMetrics(null);
+  }
+});
+
+checkUpdateButton?.addEventListener("click", async () => {
+  checkUpdateButton.disabled = true;
+  updateNotice.textContent = t("Проверяю обновления...", "Checking for updates...");
+  try {
+    renderUpdateStatus(await api("/admin/api/update/check", {method: "POST"}));
+  } catch (error) {
+    updateNotice.textContent = `${t("Не удалось проверить обновление", "Could not check update")}: ${error.message || error}`;
+  } finally {
+    checkUpdateButton.disabled = false;
+  }
+});
+
+startUpdateButton?.addEventListener("click", async () => {
+  if (!confirm(t("Запустить обновление? Приложение перезапустится после завершения.", "Start update? The app will restart after completion."))) {
+    return;
+  }
+  startUpdateButton.disabled = true;
+  updateNotice.textContent = t("Запускаю обновление...", "Starting update...");
+  try {
+    const result = await api("/admin/api/update/start", {method: "POST"});
+    updateNotice.textContent = `${t("Обновление запущено", "Update started")}: ${result.request_id || ""}`;
+  } catch (error) {
+    updateNotice.textContent = `${t("Не удалось запустить обновление", "Could not start update")}: ${error.message || error}`;
+    startUpdateButton.disabled = !(updateData?.update_supported && updateData?.update_available);
   }
 });
 

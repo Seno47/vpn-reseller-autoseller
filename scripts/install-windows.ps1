@@ -98,6 +98,9 @@ $ggselApiKey = Ask-Secret "GGsel API key (optional)"
   "DATABASE_PATH=data/reseller.sqlite3",
   "PANEL_LANGUAGE=$panelLanguage",
   "ENABLE_TELEGRAM=true",
+  "APP_UPDATE_REPO_URL=https://github.com/Seno47/vpn-reseller-autoseller.git",
+  "APP_UPDATE_BRANCH=main",
+  "APP_UPDATE_CHECK_INTERVAL_HOURS=12",
   "LOG_LEVEL=INFO"
 ) | Set-Content -Encoding UTF8 ".env"
 

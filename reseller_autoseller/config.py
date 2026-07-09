@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     digiseller_message_notifications_enabled: bool = True
     digiseller_validate_sale_sha256: bool = True
     digiseller_polling_fallback_enabled: bool = True
+    app_update_repo_url: str = "https://github.com/Seno47/vpn-reseller-autoseller"
+    app_update_branch: str = "main"
+    app_update_check_interval_hours: float = 12.0
+    app_update_trigger_file: str = ""
+    app_update_status_file: str = ""
+    app_update_command: str = ""
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(

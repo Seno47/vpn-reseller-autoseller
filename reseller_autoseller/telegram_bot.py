@@ -80,7 +80,12 @@ def main_menu(is_owner: bool, language: str = "ru") -> InlineKeyboardMarkup:
         ],
     ]
     if is_owner:
-        rows.append([InlineKeyboardButton(text=tr(language, "⚙️ Настройки", "⚙️ Settings"), callback_data="menu:settings")])
+        rows.append(
+            [
+                InlineKeyboardButton(text=tr(language, "🔄 Обновления", "🔄 Updates"), callback_data="menu:update"),
+                InlineKeyboardButton(text=tr(language, "⚙️ Настройки", "⚙️ Settings"), callback_data="menu:settings"),
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -435,6 +440,46 @@ def system_metrics_text(data: dict[str, Any], language: str = "ru") -> str:
     )
 
 
+def update_status_text(data: dict[str, Any], language: str = "ru") -> str:
+    host_status = data.get("host_status") if isinstance(data.get("host_status"), dict) else {}
+    available = bool(data.get("update_available"))
+    supported = bool(data.get("update_supported"))
+    lines = [
+        f"🔄 <b>{tr(language, 'Обновления', 'Updates')}</b>",
+        f"{tr(language, 'Текущая версия', 'Current version')}: <code>{escape(str(data.get('current_version') or 'unknown'))}</code>",
+    ]
+    if data.get("current_commit"):
+        lines.append(f"{tr(language, 'Текущий commit', 'Current commit')}: <code>{escape(str(data['current_commit']))}</code>")
+    if data.get("latest_version"):
+        lines.append(f"{tr(language, 'Последняя версия', 'Latest version')}: <code>{escape(str(data['latest_version']))}</code>")
+    if data.get("latest_commit"):
+        lines.append(f"{tr(language, 'Последний commit', 'Latest commit')}: <code>{escape(str(data['latest_commit']))}</code>")
+    if data.get("checked_at"):
+        lines.append(f"{tr(language, 'Проверено', 'Checked')}: <code>{escape(str(data['checked_at']))}</code>")
+    if data.get("error"):
+        lines.append(f"⚠️ {tr(language, 'Проверка', 'Check')}: <code>{escape(str(data['error']))}</code>")
+    if host_status:
+        status = str(host_status.get("status") or "")
+        message = str(host_status.get("message") or host_status.get("stage") or "")
+        lines.append(f"{tr(language, 'Updater', 'Updater')}: <b>{escape(status or 'unknown')}</b>")
+        if message:
+            lines.append(f"<code>{escape(message[:500])}</code>")
+    if not supported:
+        lines.append(
+            "⚠️ "
+            + tr(
+                language,
+                "Обновление с кнопки не настроено на этом сервере.",
+                "Button update is not configured on this server.",
+            )
+        )
+    elif available:
+        lines.append(f"✅ {tr(language, 'Доступно обновление.', 'An update is available.')}")
+    else:
+        lines.append(f"🟢 {tr(language, 'Установлена актуальная версия.', 'The installed version is current.')}")
+    return "\n".join(lines)
+
+
 def parse_user_payload(text: str) -> tuple[int, str]:
     parts = text.strip().split(maxsplit=1)
     if not parts or not parts[0].isdigit():
@@ -455,6 +500,8 @@ def build_dispatcher(
     digiseller: Any,
     runtime: RuntimeConfig,
     restart_bot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+    check_updates: Callable[[bool], Awaitable[dict[str, Any]]] | None = None,
+    start_update: Callable[[], dict[str, Any]] | None = None,
 ) -> Dispatcher:
     router = Router()
     delivery_service = DeliveryService(db=db, xyranet=xyranet, free_reissue_enabled=lambda: runtime.get_bool("free_reissue_enabled"))
@@ -533,6 +580,100 @@ def build_dispatcher(
             await deny_callback(callback)
             return
         await answer_or_edit(callback, system_metrics_text(collect_system_metrics(), language), back_menu(language))
+
+    def update_keyboard(data: dict[str, Any], language: str) -> InlineKeyboardMarkup:
+        buttons = [[InlineKeyboardButton(text=tr(language, "🔍 Проверить", "🔍 Check"), callback_data="update:check")]]
+        if data.get("update_supported") and data.get("update_available"):
+            buttons.append([InlineKeyboardButton(text=tr(language, "⬇️ Обновить", "⬇️ Update"), callback_data="update:confirm")])
+        buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    async def show_update_status(callback: CallbackQuery | None, message: Message | None = None, *, force: bool = False) -> None:
+        language = runtime_language(runtime)
+        if not check_updates:
+            text = "⚠️ " + tr(language, "Проверка обновлений недоступна.", "Update checking is unavailable.")
+            markup = back_menu(language)
+        else:
+            data = await check_updates(force)
+            text = update_status_text(data, language)
+            markup = update_keyboard(data, language)
+        if callback:
+            await answer_or_edit(callback, text, markup)
+        elif message:
+            await message.answer(text, reply_markup=markup)
+
+    @router.message(Command("update"))
+    async def update_command(message: Message) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_owner(uid):
+            await deny_message(message)
+            return
+        await message.answer(tr(language, "🔍 Проверяю обновления...", "🔍 Checking for updates..."))
+        await show_update_status(None, message, force=True)
+
+    @router.callback_query(F.data == "menu:update")
+    async def update_menu(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_owner(uid):
+            await deny_callback(callback)
+            return
+        await show_update_status(callback, force=False)
+
+    @router.callback_query(F.data == "update:check")
+    async def update_check(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_owner(uid):
+            await deny_callback(callback)
+            return
+        await show_update_status(callback, force=True)
+
+    @router.callback_query(F.data == "update:confirm")
+    async def update_confirm(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_owner(uid):
+            await deny_callback(callback)
+            return
+        buttons = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=tr(language, "✅ Да, обновить", "✅ Yes, update"), callback_data="update:start")],
+                [InlineKeyboardButton(text=tr(language, "⬅️ Отмена", "⬅️ Cancel"), callback_data="menu:update")],
+            ]
+        )
+        await answer_or_edit(
+            callback,
+            "⚠️ "
+            + tr(
+                language,
+                "После запуска приложение обновится и перезапустится. Запустить обновление?",
+                "After starting, the app will update and restart. Start update?",
+            ),
+            buttons,
+        )
+
+    @router.callback_query(F.data == "update:start")
+    async def update_start(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_owner(uid):
+            await deny_callback(callback)
+            return
+        if not start_update:
+            await callback.answer(tr(language, "⚠️ Обновление не настроено", "⚠️ Updates are not configured"), show_alert=True)
+            return
+        try:
+            result = start_update()
+        except Exception as exc:
+            await callback.answer(f"⚠️ {escape(str(exc))}", show_alert=True)
+            return
+        await answer_or_edit(
+            callback,
+            f"⬇️ <b>{tr(language, 'Обновление запущено', 'Update started')}</b>\n"
+            f"{tr(language, 'ID запроса', 'Request ID')}: <code>{escape(str(result.get('request_id') or ''))}</code>\n"
+            f"{tr(language, 'Приложение перезапустится после завершения.', 'The app will restart after completion.')}",
+            back_menu(language),
+        )
 
     @router.callback_query(F.data == "menu:balance")
     async def balance(callback: CallbackQuery) -> None:
@@ -1067,9 +1208,19 @@ async def run_bot(
     digiseller: Any,
     runtime: RuntimeConfig,
     restart_bot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+    check_updates: Callable[[bool], Awaitable[dict[str, Any]]] | None = None,
+    start_update: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dispatcher = build_dispatcher(db=db, xyranet=xyranet, digiseller=digiseller, runtime=runtime, restart_bot=restart_bot)
+    dispatcher = build_dispatcher(
+        db=db,
+        xyranet=xyranet,
+        digiseller=digiseller,
+        runtime=runtime,
+        restart_bot=restart_bot,
+        check_updates=check_updates,
+        start_update=start_update,
+    )
     try:
         await dispatcher.start_polling(bot)
     finally:

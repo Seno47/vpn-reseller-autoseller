@@ -227,7 +227,8 @@ p {
   margin-top: 4px;
 }
 
-.system-grid {
+.system-grid,
+.update-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;

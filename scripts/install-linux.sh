@@ -5,6 +5,8 @@ APP_NAME="xyranet-reseller-autoseller"
 APP_DIR="${APP_DIR:-/opt/${APP_NAME}}"
 APP_USER="${APP_USER:-xyranet-reseller}"
 APP_PORT="${APP_PORT:-8095}"
+APP_REPO_URL="${REPO_URL:-https://github.com/Seno47/vpn-reseller-autoseller.git}"
+APP_BRANCH="${APP_BRANCH:-main}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 
@@ -132,7 +134,7 @@ prepare_system_packages() {
     echo "Skipping system upgrade because SKIP_SYSTEM_UPGRADE=1."
   fi
 
-  apt_install ca-certificates curl git rsync openssl build-essential python3-dev
+  apt_install ca-certificates curl git rsync openssl build-essential python3-dev util-linux
   install_python_runtime
 }
 
@@ -161,12 +163,17 @@ ADMIN_PASSWORD=${ADMIN_PASSWORD}
 DATABASE_PATH=data/reseller.sqlite3
 PANEL_LANGUAGE=${PANEL_LANGUAGE}
 ENABLE_TELEGRAM=true
+APP_UPDATE_REPO_URL=${APP_REPO_URL}
+APP_UPDATE_BRANCH=${APP_BRANCH}
+APP_UPDATE_CHECK_INTERVAL_HOURS=12
+APP_UPDATE_TRIGGER_FILE=data/update-request.json
+APP_UPDATE_STATUS_FILE=data/update-status.json
 LOG_LEVEL=INFO
 EOF_ENV
 }
 
 install_source() {
-  local repo_url="${REPO_URL:-}"
+  local repo_url="${APP_REPO_URL:-}"
   if [ -f "run.py" ] && [ -d "reseller_autoseller" ]; then
     mkdir -p "$APP_DIR"
     rsync -a --delete \
@@ -180,6 +187,7 @@ install_source() {
 
   if [ -z "$repo_url" ]; then
     repo_url="$(ask "GitHub repository URL")"
+    APP_REPO_URL="$repo_url"
   fi
   if [ -d "$APP_DIR/.git" ]; then
     git -C "$APP_DIR" pull --ff-only
@@ -187,6 +195,42 @@ install_source() {
     rm -rf "$APP_DIR"
     git clone "$repo_url" "$APP_DIR"
   fi
+}
+
+install_update_service() {
+  local updater="/usr/local/sbin/${APP_NAME}-update"
+  install -m 0755 "$APP_DIR/scripts/update-linux.sh" "$updater"
+  cat > "/etc/systemd/system/${APP_NAME}-updater.service" <<EOF_SERVICE
+[Unit]
+Description=XyraNet reseller autoseller updater
+
+[Service]
+Type=oneshot
+Environment=APP_NAME=${APP_NAME}
+Environment=APP_DIR=${APP_DIR}
+Environment=APP_USER=${APP_USER}
+Environment=APP_REPO_URL=${APP_REPO_URL}
+Environment=APP_BRANCH=${APP_BRANCH}
+Environment=APP_SERVICE_NAME=${APP_NAME}.service
+Environment=APP_REQUEST_FILE=${APP_DIR}/data/update-request.json
+Environment=APP_STATUS_FILE=${APP_DIR}/data/update-status.json
+ExecStart=${updater}
+EOF_SERVICE
+
+  cat > "/etc/systemd/system/${APP_NAME}-updater.path" <<EOF_PATH
+[Unit]
+Description=Watch XyraNet reseller autoseller update requests
+
+[Path]
+PathExists=${APP_DIR}/data/update-request.json
+Unit=${APP_NAME}-updater.service
+
+[Install]
+WantedBy=multi-user.target
+EOF_PATH
+
+  systemctl daemon-reload
+  systemctl enable --now "${APP_NAME}-updater.path"
 }
 
 install_systemd() {
@@ -292,6 +336,7 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 chmod 600 "$APP_DIR/.env"
 
 install_systemd
+install_update_service
 
 if [ -n "$DOMAIN" ]; then
   install_nginx_https "$DOMAIN"
