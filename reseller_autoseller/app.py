@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -12,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urljoin
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -169,6 +170,9 @@ def create_app() -> FastAPI:
     login_failures: dict[str, list[float]] = {}
     admin_sessions: dict[str, float] = {}
     digiseller_api_backoff_until = 0.0
+
+    if not runtime.get_text("digiseller_notification_secret"):
+        db.set_setting("digiseller_notification_secret", secrets.token_urlsafe(32))
 
     def notify_admins(text: str, kind: str = "errors") -> None:
         setting_key = f"notify_{kind}"
@@ -341,6 +345,81 @@ def create_app() -> FastAPI:
                 if found:
                     return found
         return ""
+
+    async def notification_payload(request: Request) -> dict[str, Any]:
+        payload: dict[str, Any] = {key: value for key, value in request.query_params.items()}
+        if request.method.upper() != "POST":
+            return payload
+        content_type = request.headers.get("content-type", "").lower()
+        try:
+            if "application/json" in content_type:
+                body = await request.json()
+                if isinstance(body, dict):
+                    payload.update(body)
+            elif "application/x-www-form-urlencoded" in content_type:
+                raw = (await request.body()).decode("utf-8", errors="replace")
+                payload.update({key: value for key, value in parse_qsl(raw, keep_blank_values=True)})
+            else:
+                raw = (await request.body()).decode("utf-8", errors="replace").strip()
+                if raw:
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            payload.update(parsed)
+                    except ValueError:
+                        pass
+        except Exception:
+            log.exception("Cannot parse Digiseller notification body")
+        return payload
+
+    def payload_get(payload: dict[str, Any], *keys: str) -> str:
+        lowered = {str(key).lower(): value for key, value in payload.items()}
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+            value = lowered.get(key.lower())
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    def notification_secret_ok(secret: str) -> bool:
+        expected = runtime.get_text("digiseller_notification_secret")
+        return bool(expected) and secrets.compare_digest(str(secret or ""), expected)
+
+    def verify_notification_secret(secret: str) -> None:
+        if not notification_secret_ok(secret):
+            raise HTTPException(status_code=404, detail="Not found")
+
+    def digiseller_base_notification_urls() -> tuple[str, str]:
+        base_url = runtime.get_text("app_base_url").rstrip("/") or "http://127.0.0.1:8095"
+        secret = runtime.get_text("digiseller_notification_secret")
+        return (
+            f"{base_url}/api/digiseller/notify/sale/{secret}",
+            f"{base_url}/api/digiseller/notify/message/{secret}",
+        )
+
+    def mapped_plati_products_by_id(product_id: str) -> list[dict[str, Any]]:
+        selected = str(product_id or "").strip()
+        if not selected:
+            return []
+        return [
+            product
+            for product in db.list_products()
+            if str(product.get("marketplace") or "") == "plati"
+            and str(product.get("external_product_id") or "") == selected
+            and int(product.get("enabled", 0))
+        ]
+
+    def sale_notification_signature_ok(payload: dict[str, Any], invoice_id: str, product_id: str) -> bool:
+        if not runtime.get_bool("digiseller_validate_sale_sha256"):
+            return True
+        received = payload_get(payload, "sha256", "SHA256")
+        if not received:
+            return False
+        api_key = runtime.get_text("digiseller_api_key").lower()
+        expected = hashlib.sha256(f"{api_key};{invoice_id};{product_id}".encode("utf-8")).hexdigest()
+        return secrets.compare_digest(received.lower(), expected.lower())
 
     def chat_invoice_id(chat: dict[str, Any]) -> str:
         for key in ("id_i", "invoice_id", "inv", "order_id"):
@@ -801,6 +880,102 @@ def create_app() -> FastAPI:
             )
             return True
 
+    async def process_pending_operation_message(marketplace: str, chat_id: str, text: str) -> bool:
+        operation = pending_operation_for_chat(marketplace, chat_id)
+        if not operation:
+            return False
+        command = parse_chat_command(text)
+        found_order_id = ""
+        if command:
+            if command["command"] == delivery_service.expected_command("status"):
+                return False
+            expected_action = str(operation["action"])
+            if command["command"] != delivery_service.expected_command(expected_action):
+                command_action = delivery_service.action_for_command(command["command"]) or command["action"]
+                wrong_command_action = command_action or command["command"]
+                db.add_order_event(
+                    marketplace=str(operation["marketplace"]),
+                    external_order_id=str(operation["external_order_id"]),
+                    sale_id=int(operation["sale_id"]),
+                    pending_operation_id=int(operation["id"]),
+                    event_type="pending_wrong_command",
+                    status="warning",
+                    message=wrong_command_action,
+                    payload={"expected_action": operation["action"], "source": "digiseller_message_notification"},
+                )
+                await messenger.send_message(
+                    str(operation["marketplace"]),
+                    str(operation["external_order_id"]),
+                    delivery_service.command_mismatch_text(str(operation["action"]), wrong_command_action),
+                )
+                return True
+            found_order_id = command["order_id"]
+            if not found_order_id:
+                db.add_order_event(
+                    marketplace=str(operation["marketplace"]),
+                    external_order_id=str(operation["external_order_id"]),
+                    sale_id=int(operation["sale_id"]),
+                    pending_operation_id=int(operation["id"]),
+                    event_type="pending_missing_order_id",
+                    status="warning",
+                    payload={"action": operation["action"], "source": "digiseller_message_notification"},
+                )
+                await messenger.send_message(
+                    str(operation["marketplace"]),
+                    str(operation["external_order_id"]),
+                    delivery_service.ask_order_id_text(str(operation["action"])),
+                )
+                return True
+        else:
+            found_order_id = extract_order_id_from_text(text)
+        if not found_order_id:
+            return False
+        try:
+            db.add_order_event(
+                marketplace=str(operation["marketplace"]),
+                external_order_id=str(operation["external_order_id"]),
+                sale_id=int(operation["sale_id"]),
+                pending_operation_id=int(operation["id"]),
+                event_type="pending_order_id_received",
+                payload={"target_order_id": found_order_id, "action": operation["action"], "source": "digiseller_message_notification"},
+            )
+            result = await delivery_service.complete_pending_operation(operation, found_order_id)
+            notify_admins(
+                f"✅ <b>{tr('Услуга применена', 'Service applied')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
+                f"{tr('Действие', 'Action')}: <b>{escape(action_label(str(operation['action'])))}</b>\n"
+                f"{tr('ID заказа', 'Order ID')}: <code>{escape(found_order_id)}</code>\n"
+                f"{tr('Статус', 'Status')}: <b>{escape(str(result.get('status') or 'delivered'))}</b>",
+                kind="pending",
+            )
+            return True
+        except Exception as exc:
+            db.fail_pending_operation(int(operation["id"]), str(exc))
+            db.add_order_event(
+                marketplace=str(operation["marketplace"]),
+                external_order_id=str(operation["external_order_id"]),
+                sale_id=int(operation["sale_id"]),
+                pending_operation_id=int(operation["id"]),
+                event_type="pending_failed",
+                status="error",
+                message=str(exc),
+                payload={"target_order_id": found_order_id, "action": operation["action"], "source": "digiseller_message_notification"},
+            )
+            await messenger.send_message(
+                str(operation["marketplace"]),
+                str(operation["external_order_id"]),
+                delivery_service.operation_error_text(str(operation["action"]), exc),
+            )
+            notify_admins(
+                f"🚨 <b>{tr('Ошибка pending-операции', 'Pending operation error')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(str(operation['marketplace']))}:{escape(str(operation['external_order_id']))}</code>\n"
+                f"{tr('Действие', 'Action')}: <b>{escape(action_label(str(operation['action'])))}</b>\n"
+                f"{tr('ID заказа', 'Order ID')}: <code>{escape(found_order_id)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return True
+
     async def process_digiseller_chat_messages(invoice_id: str) -> bool:
         if digiseller_api_paused():
             return False
@@ -866,7 +1041,14 @@ def create_app() -> FastAPI:
         return handled
 
     async def poll_digiseller_unique_code_chats() -> None:
-        if not digiseller_polling_configured() or digiseller_api_paused():
+        if (
+            not digiseller_polling_configured()
+            or digiseller_api_paused()
+            or (
+                runtime.get_bool("digiseller_message_notifications_enabled")
+                and not runtime.get_bool("digiseller_polling_fallback_enabled")
+            )
+        ):
             return
         seen_invoice_ids: set[str] = set()
         try:
@@ -887,7 +1069,14 @@ def create_app() -> FastAPI:
             await process_digiseller_chat_messages(invoice_id)
 
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
-        if not digiseller_unique_code_requests_enabled() or digiseller_api_paused():
+        if (
+            not digiseller_unique_code_requests_enabled()
+            or digiseller_api_paused()
+            or (
+                runtime.get_bool("digiseller_sale_notifications_enabled")
+                and not runtime.get_bool("digiseller_polling_fallback_enabled")
+            )
+        ):
             return
         now = datetime.now(DIGISELLER_NAIVE_DATETIME_ZONE)
         start = now - timedelta(hours=72)
@@ -1366,6 +1555,154 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, Any]:
         return {"status": "ok"}
 
+    @app.api_route("/api/digiseller/notify/sale/{secret}", methods=["GET", "POST"])
+    async def digiseller_sale_notification(secret: str, request: Request) -> dict[str, Any]:
+        verify_notification_secret(secret)
+        if not runtime.get_bool("digiseller_sale_notifications_enabled"):
+            return {"status": "ignored", "reason": "sale notifications disabled"}
+        payload = await notification_payload(request)
+        invoice_id = payload_get(payload, "id_i", "ID_I", "invoice_id", "InvoiceId", "inv")
+        product_id = payload_get(payload, "id_d", "ID_D", "product_id", "ProductId", "id_goods")
+        amount = payload_get(payload, "amount", "Amount")
+        currency = payload_get(payload, "curr", "Currency", "currency")
+        email = payload_get(payload, "email", "Email")
+        sale_date = payload_get(payload, "date", "Date")
+        is_my_product = payload_get(payload, "isMyProduct", "IsMyProduct")
+        if not invoice_id or not product_id:
+            raise HTTPException(status_code=400, detail="Digiseller notification has no invoice or product ID")
+        if is_my_product and is_my_product.strip().lower() in {"0", "false", "no"}:
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=invoice_id,
+                event_type="digiseller_sale_notification_ignored",
+                status="info",
+                message="Not seller product",
+                payload={"product_id": product_id},
+            )
+            return {"status": "ignored", "reason": "not seller product"}
+        if not sale_notification_signature_ok(payload, invoice_id, product_id):
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=invoice_id,
+                event_type="digiseller_sale_notification_signature_failed",
+                status="error",
+                payload={"product_id": product_id},
+            )
+            raise HTTPException(status_code=403, detail="Invalid Digiseller sale notification signature")
+        mapped_products = mapped_plati_products_by_id(product_id)
+        db.add_order_event(
+            marketplace="plati",
+            external_order_id=invoice_id,
+            event_type="digiseller_sale_notification_received",
+            status="info",
+            payload={
+                "product_id": product_id,
+                "amount": amount,
+                "currency": currency,
+                "email": email,
+                "date": sale_date,
+                "mapped_products": len(mapped_products),
+            },
+        )
+        if db.digiseller_invoice_has_delivery(invoice_id):
+            return {"status": "ignored", "reason": "invoice already has delivery"}
+        if not mapped_products:
+            notify_admins(
+                f"⚠️ <b>{tr('Продажа Digiseller без маппинга', 'Digiseller sale without mapping')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('Товар', 'Product')}: <code>{escape(product_id)}</code>",
+                kind="errors",
+            )
+            return {"status": "ignored", "reason": "mapped product was not found"}
+        if not runtime.get_bool("digiseller_unique_code_request_enabled"):
+            return {"status": "ignored", "reason": "unique code requests disabled"}
+        events = db.list_order_events(marketplace="plati", external_order_id=invoice_id, limit=100)
+        if any(str(event.get("event_type") or "") == "unique_code_request_sent" and str(event.get("status") or "") == "success" for event in events):
+            return {"status": "ignored", "reason": "request was already sent"}
+        product = mapped_products[0]
+        purchase = {
+            "content": {
+                "item_id": product_id,
+                "amount": amount,
+                "currency_type": currency,
+                "date_pay": sale_date,
+                "buyer_info": {"email": email},
+                "unique_code_state": {"state": 1},
+            }
+        }
+        text = delivery_service.render_system_text(
+            "request_unique_code",
+            unique_code_request_context(invoice_id, purchase, product),
+        )
+        if await messenger.send_message("plati", invoice_id, text):
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=invoice_id,
+                event_type="unique_code_request_sent",
+                status="success",
+                payload={"product_id": product_id, "source": "digiseller_sale_notification"},
+            )
+            notify_admins(
+                f"📨 <b>{tr('Запрошен уникальный код Digiseller', 'Digiseller unique code requested')}</b>\n"
+                f"{tr('Источник', 'Source')}: <b>URL notification</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('Товар', 'Product')}: <code>{escape(product_id)}</code>",
+                kind="pending",
+            )
+            return {"status": "ok", "action": "unique_code_requested"}
+        db.add_order_event(
+            marketplace="plati",
+            external_order_id=invoice_id,
+            event_type="unique_code_request_failed",
+            status="error",
+            message="Cannot send unique code request to Digiseller chat",
+            payload={"product_id": product_id, "source": "digiseller_sale_notification"},
+        )
+        raise HTTPException(status_code=502, detail="Cannot send unique code request to Digiseller chat")
+
+    @app.api_route("/api/digiseller/notify/message/{secret}", methods=["GET", "POST"])
+    async def digiseller_message_notification(secret: str, request: Request) -> dict[str, Any]:
+        verify_notification_secret(secret)
+        if not runtime.get_bool("digiseller_message_notifications_enabled"):
+            return {"status": "ignored", "reason": "message notifications disabled"}
+        payload = await notification_payload(request)
+        invoice_id = payload_get(payload, "InvoiceId", "invoice_id", "id_i", "ID_I", "inv")
+        text = payload_get(payload, "Message", "MessageText", "message", "text")
+        message_id = payload_get(payload, "DebateId", "MessageId", "ID_D", "ID_M", "message_id", "id")
+        message_date = payload_get(payload, "MessageDate", "message_date", "date")
+        if not invoice_id or not text:
+            raise HTTPException(status_code=400, detail="Digiseller message notification has no invoice or message text")
+        last_seen = db.get_chat_cursor("plati", invoice_id)
+        if message_id and last_seen == message_id:
+            return {"status": "ignored", "reason": "duplicate message notification"}
+        db.add_order_event(
+            marketplace="plati",
+            external_order_id=invoice_id,
+            event_type="digiseller_message_notification_received",
+            status="info",
+            payload={"message_id": message_id, "message_date": message_date, "text_preview": compact_text(text, 300)},
+        )
+        notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
+        handled = False
+        handled_action = ""
+        for code in unique_codes_from_text(text):
+            handled = await process_unique_code_message(invoice_id, code)
+            if handled:
+                handled_action = "unique_code"
+                break
+        if not handled:
+            handled = await process_subscription_status_command("plati", invoice_id, text)
+            handled_action = "status" if handled else ""
+        if not handled:
+            handled = await process_free_reissue_command(invoice_id, text, message_id)
+            handled_action = "free_reissue" if handled else ""
+        if not handled:
+            handled = await process_pending_operation_message("plati", invoice_id, text)
+            handled_action = "pending_operation" if handled else ""
+        if message_id:
+            db.set_chat_cursor("plati", invoice_id, message_id)
+        return {"status": "ok", "handled": handled, "action": handled_action}
+
     @app.post("/admin/api/login")
     async def admin_login(request: Request, payload: LoginIn) -> dict[str, str]:
         ensure_admin_secrets_are_safe()
@@ -1388,6 +1725,22 @@ def create_app() -> FastAPI:
             "telegram_enabled": bool(runtime.get_bool("enable_telegram") and runtime.get_text("telegram_bot_token")),
             "telegram_running": telegram_status()["running"],
             "bot_admins": len(runtime.bot_admin_ids()),
+        }
+
+    @app.get("/admin/api/digiseller/notification-urls", dependencies=[Depends(require_admin)])
+    async def admin_digiseller_notification_urls() -> dict[str, Any]:
+        sale_url, message_url = digiseller_base_notification_urls()
+        return {
+            "sale_url": sale_url,
+            "sale_method": "POST",
+            "message_url": message_url,
+            "message_method": "POST",
+            "message_send_body": True,
+            "app_base_url": runtime.get_text("app_base_url"),
+            "sale_notifications_enabled": runtime.get_bool("digiseller_sale_notifications_enabled"),
+            "message_notifications_enabled": runtime.get_bool("digiseller_message_notifications_enabled"),
+            "sha256_validation_enabled": runtime.get_bool("digiseller_validate_sale_sha256"),
+            "polling_fallback_enabled": runtime.get_bool("digiseller_polling_fallback_enabled"),
         }
 
     @app.get("/admin/api/system", dependencies=[Depends(require_admin)])

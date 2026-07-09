@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     free_reissue_enabled: bool = True
     digiseller_unique_code_request_enabled: bool = True
     digiseller_unique_code_request_delay_minutes: float = 5.0
+    digiseller_notification_secret: str = ""
+    digiseller_sale_notifications_enabled: bool = True
+    digiseller_message_notifications_enabled: bool = True
+    digiseller_validate_sale_sha256: bool = True
+    digiseller_polling_fallback_enabled: bool = True
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(

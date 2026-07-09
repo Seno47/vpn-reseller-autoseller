@@ -1,3 +1,4 @@
+import hashlib
 import os
 import unittest
 from tempfile import TemporaryDirectory
@@ -23,6 +24,8 @@ class AdminSecurityTests(unittest.TestCase):
             "ADMIN_IDS": "123456789",
             "ENABLE_TELEGRAM": "false",
             "TELEGRAM_BOT_TOKEN": "",
+            "APP_BASE_URL": "https://panel.example",
+            "DIGISELLER_API_KEY": "TEST_DIGISELLER_KEY",
         }
         patcher = patch.dict(os.environ, env, clear=False)
         patcher.start()
@@ -181,6 +184,54 @@ class AdminSecurityTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["command"], "!info")
+
+    def test_digiseller_notification_urls_are_available(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            response = client.get("/admin/api/digiseller/notification-urls", headers=headers)
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data["sale_url"].startswith("https://panel.example/api/digiseller/notify/sale/"))
+            self.assertTrue(data["message_url"].startswith("https://panel.example/api/digiseller/notify/message/"))
+
+    def test_digiseller_sale_notification_validates_secret_and_sha(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+            urls = client.get("/admin/api/digiseller/notification-urls", headers=headers).json()
+            secret = urls["sale_url"].rstrip("/").split("/")[-1]
+            invoice_id = "296211150"
+            product_id = "5968452"
+            valid_sha = hashlib.sha256(f"test_digiseller_key;{invoice_id};{product_id}".encode("utf-8")).hexdigest()
+
+            bad_secret = client.post(
+                "/api/digiseller/notify/sale/bad-secret",
+                json={"ID_I": invoice_id, "ID_D": product_id, "SHA256": valid_sha},
+            )
+            bad_sha = client.post(
+                f"/api/digiseller/notify/sale/{secret}",
+                json={"ID_I": invoice_id, "ID_D": product_id, "SHA256": "bad"},
+            )
+            valid = client.post(
+                f"/api/digiseller/notify/sale/{secret}",
+                json={"ID_I": invoice_id, "ID_D": product_id, "SHA256": valid_sha},
+            )
+
+            self.assertEqual(bad_secret.status_code, 404)
+            self.assertEqual(bad_sha.status_code, 403)
+            self.assertEqual(valid.status_code, 200)
+            self.assertEqual(valid.json()["status"], "ignored")
 
 
 if __name__ == "__main__":

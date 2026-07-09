@@ -136,7 +136,15 @@ const RU_TO_EN = {
   "Digiseller": "Digiseller",
   "Запрос уникального кода": "Unique code request",
   "Покупатель не прислал уникальный код": "Buyer has not sent the unique code",
-  "Код от другого заказа": "Code from another order"
+  "Код от другого заказа": "Code from another order",
+  "URL-уведомления Digiseller": "Digiseller URL notifications",
+  "Продажа товара": "Product sale",
+  "Сообщения": "Messages",
+  "Метод": "Method",
+  "Скопировать": "Copy",
+  "В Digiseller откройте Личный кабинет → Уведомления → URL. Для продажи товара вставьте первый URL, для сообщений второй URL.": "In Digiseller open Account → Notifications → URL. Use the first URL for product sales and the second URL for messages.",
+  "Для сообщений включите передачу тела сообщения.": "Enable message body forwarding for messages.",
+  "Если домена нет, используйте публичный URL reverse tunnel и укажите его как Base URL.": "If there is no domain, use a public reverse tunnel URL and set it as Base URL."
 };
 
 const textNodeOriginals = new WeakMap();
@@ -211,6 +219,7 @@ const refreshButton = document.querySelector("#refreshButton");
 const productForm = document.querySelector("#productForm");
 const resetMappingButton = document.querySelector("#resetMappingButton");
 const settingsForm = document.querySelector("#settingsForm");
+const digisellerNotificationUrls = document.querySelector("#digisellerNotificationUrls");
 const botUserForm = document.querySelector("#botUserForm");
 const restartTelegramButton = document.querySelector("#restartTelegramButton");
 const telegramRestartStatus = document.querySelector("#telegramRestartStatus");
@@ -1435,6 +1444,53 @@ function renderSettings(rows) {
   }).join("") + `<button type="submit">${t("Сохранить настройки", "Save settings")}</button>`;
 }
 
+function renderDigisellerNotificationUrls(config) {
+  if (!digisellerNotificationUrls) {
+    return;
+  }
+  if (!config) {
+    digisellerNotificationUrls.innerHTML = "";
+    return;
+  }
+  const saleEnabled = config.sale_notifications_enabled ? t("включено", "enabled") : t("выключено", "disabled");
+  const messageEnabled = config.message_notifications_enabled ? t("включено", "enabled") : t("выключено", "disabled");
+  digisellerNotificationUrls.innerHTML = `
+    <div class="webhook-head">
+      <h3>${t("URL-уведомления Digiseller", "Digiseller URL notifications")}</h3>
+      <span class="pill neutral">sale: ${saleEnabled}</span>
+      <span class="pill neutral">messages: ${messageEnabled}</span>
+    </div>
+    <p>${t("В Digiseller откройте Личный кабинет → Уведомления → URL. Для продажи товара вставьте первый URL, для сообщений второй URL.", "In Digiseller open Account → Notifications → URL. Use the first URL for product sales and the second URL for messages.")}</p>
+    <div class="webhook-url-grid">
+      <label>${t("Продажа товара", "Product sale")}
+        <div class="copy-row">
+          <input readonly value="${escapeHtml(config.sale_url || "")}">
+          <button class="secondary" type="button" data-copy-url="sale">${t("Скопировать", "Copy")}</button>
+        </div>
+        <small>${t("Метод", "Method")}: ${escapeHtml(config.sale_method || "POST")}</small>
+      </label>
+      <label>${t("Сообщения", "Messages")}
+        <div class="copy-row">
+          <input readonly value="${escapeHtml(config.message_url || "")}">
+          <button class="secondary" type="button" data-copy-url="message">${t("Скопировать", "Copy")}</button>
+        </div>
+        <small>${t("Метод", "Method")}: ${escapeHtml(config.message_method || "POST")} · ${t("Для сообщений включите передачу тела сообщения.", "Enable message body forwarding for messages.")}</small>
+      </label>
+    </div>
+    <small>${t("Если домена нет, используйте публичный URL reverse tunnel и укажите его как Base URL.", "If there is no domain, use a public reverse tunnel URL and set it as Base URL.")}</small>
+  `;
+  digisellerNotificationUrls.querySelectorAll("[data-copy-url]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const value = button.dataset.copyUrl === "sale" ? config.sale_url : config.message_url;
+      await navigator.clipboard.writeText(value || "");
+      button.textContent = "OK";
+      setTimeout(() => {
+        button.textContent = t("Скопировать", "Copy");
+      }, 900);
+    });
+  });
+}
+
 function renderBotUsers(rows) {
   botUsers.innerHTML = rows.map((row) => {
     const action = row.locked
@@ -1592,12 +1648,13 @@ async function loadAll() {
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
     const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
-    const [status, systemConfig, productsRows, salesRows, settingsRows, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
+    const [status, systemConfig, productsRows, salesRows, settingsRows, notificationUrls, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
       api("/admin/api/status"),
       api("/admin/api/system").catch(() => null),
       api("/admin/api/products"),
       api("/admin/api/sales"),
       api("/admin/api/settings"),
+      api("/admin/api/digiseller/notification-urls"),
       api("/admin/api/bot-users"),
       api("/admin/api/tariffs").catch(() => []),
       api("/admin/api/delivery-template"),
@@ -1622,6 +1679,7 @@ async function loadAll() {
     renderProducts();
     renderSales(salesRows);
     renderSettings(settingsRows);
+    renderDigisellerNotificationUrls(notificationUrls);
     renderBotUsers(botUserRows);
     renderTariffOptions(tariffsRows);
     renderTemplateVariables(templateConfig);

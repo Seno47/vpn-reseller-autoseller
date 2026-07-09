@@ -304,6 +304,50 @@ p {
   font-size: 13px;
 }
 
+.webhook-card {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.webhook-card:empty {
+  display: none;
+}
+
+.webhook-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.webhook-head h3 {
+  margin: 0;
+  font-size: 16px;
+  margin-right: auto;
+}
+
+.webhook-url-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.copy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.copy-row input {
+  min-width: 0;
+  font-family: Consolas, "Liberation Mono", monospace;
+}
+
 .grid-form {
   display: grid;
   grid-template-columns: minmax(150px, 0.9fr) minmax(180px, 1fr) minmax(170px, 1fr) minmax(340px, 2fr) minmax(210px, 1.3fr) auto;
