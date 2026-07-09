@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     digiseller_seller_id: str = ""
     digiseller_api_key: str = ""
+    digiseller_notification_password: str = ""
     ggsel_seller_id: str = ""
     ggsel_api_key: str = ""
 

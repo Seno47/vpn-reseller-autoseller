@@ -79,6 +79,14 @@ SETTING_DEFINITIONS = [
         description_ru="Секретная часть URL для уведомлений Digiseller о продажах и сообщениях.",
     ),
     SettingDefinition(
+        "digiseller_notification_password",
+        "Digiseller notification password",
+        sensitive=True,
+        label_ru="Пароль SHA256 уведомлений Digiseller",
+        description="Optional Digiseller password used to validate sale notification SHA256. Leave empty to rely on the secret URL or disable SHA validation.",
+        description_ru="Опциональный пароль Digiseller для проверки SHA256 уведомлений о продажах. Если пусто, используйте секретный URL или отключите SHA-проверку.",
+    ),
+    SettingDefinition(
         "digiseller_sale_notifications_enabled",
         "Digiseller sale notifications",
         kind="boolean",
@@ -99,8 +107,8 @@ SETTING_DEFINITIONS = [
         "Validate Digiseller sale SHA256",
         kind="boolean",
         label_ru="Проверять SHA256 продажи Digiseller",
-        description="Checks the sale notification signature using Digiseller API key, invoice ID and product ID.",
-        description_ru="Проверяет подпись уведомления о продаже по API-ключу Digiseller, ID заказа и ID товара.",
+        description="Checks the sale notification signature using the Digiseller notification password, invoice ID and product ID.",
+        description_ru="Проверяет подпись уведомления о продаже по паролю SHA256 уведомлений Digiseller, ID заказа и ID товара.",
     ),
     SettingDefinition(
         "digiseller_polling_fallback_enabled",

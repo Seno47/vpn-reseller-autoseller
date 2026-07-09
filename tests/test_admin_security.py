@@ -233,6 +233,45 @@ class AdminSecurityTests(unittest.TestCase):
             self.assertEqual(valid.status_code, 200)
             self.assertEqual(valid.json()["status"], "ignored")
 
+    def test_digiseller_sale_notification_schedules_unique_code_request(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+            client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"digiseller_validate_sale_sha256": False}},
+            )
+            product = client.post(
+                "/admin/api/products",
+                headers=headers,
+                json={
+                    "marketplace": "plati",
+                    "external_product_id": "5968452",
+                    "external_variant_id": "23468281",
+                    "action": "create",
+                    "action_params": {},
+                    "tariff_code": "lite_monthly",
+                    "title": "Lite 1 month",
+                    "enabled": True,
+                },
+            )
+            self.assertEqual(product.status_code, 200)
+            urls = client.get("/admin/api/digiseller/notification-urls", headers=headers).json()
+            secret = urls["sale_url"].rstrip("/").split("/")[-1]
+
+            response = client.post(
+                f"/api/digiseller/notify/sale/{secret}",
+                json={"ID_I": "296240253", "ID_D": "5968452", "Amount": "119", "Currency": "WMR"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["action"], "unique_code_request_scheduled")
+
 
 if __name__ == "__main__":
     unittest.main()
