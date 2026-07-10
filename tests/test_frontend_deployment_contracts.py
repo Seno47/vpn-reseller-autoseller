@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -119,6 +122,40 @@ class FrontendDeploymentContractTests(unittest.TestCase):
         self.assertNotIn('chown -R "$APP_USER:$APP_USER" "$APP_DIR"', updater)
         self.assertIn('refresh_host_updater "$APP_DIR/scripts/update-linux.sh"', updater)
         self.assertIn("os.rename(path, rejected_path)", updater)
+
+    def test_updater_writes_docker_env_values_without_literal_quotes(self) -> None:
+        updater = self.read("scripts/update-linux.sh")
+        function = updater[updater.index("upsert_env()") : updater.index("validate_app_dir_path()")]
+        block = re.search(r"<<'PY'\n(.*?)\nPY", function, flags=re.DOTALL)
+        self.assertIsNotNone(block)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text('APP_UPDATE_CURRENT_COMMIT="old"\n', encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-",
+                    str(env_file),
+                    "APP_UPDATE_CURRENT_COMMIT",
+                    "1e6d794f6c75",
+                ],
+                input=(
+                    "import os\n"
+                    "if not hasattr(os, 'fchmod'): os.fchmod = lambda *_: None\n"
+                    "if not hasattr(os, 'fchown'): os.fchown = lambda *_: None\n"
+                    + block.group(1)
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                "APP_UPDATE_CURRENT_COMMIT=1e6d794f6c75\n",
+            )
 
     def test_update_documentation_explains_the_privilege_boundary(self) -> None:
         readme = self.read("README.md")

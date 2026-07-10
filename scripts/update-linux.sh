@@ -145,6 +145,7 @@ upsert_env() {
   local value="$3"
   python3 - "$env_file" "$key" "$value" <<'PY'
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -157,6 +158,13 @@ if "\n" in key or "\n" in value or "\r" in key or "\r" in value:
     raise SystemExit("Refusing a multiline environment value")
 if "${" in value:
     raise SystemExit("Refusing an environment value containing ${...}")
+if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+    raise SystemExit("Refusing an invalid environment key")
+# This file is consumed both by systemd EnvironmentFile and Docker --env-file.
+# Docker keeps shell-style quote characters as part of the value, so use a
+# conservative unquoted alphabet that is valid in both parsers.
+if not re.fullmatch(r"[A-Za-z0-9_./:@%+,=-]*", value):
+    raise SystemExit("Refusing an environment value that requires quoting")
 if path.is_symlink():
     raise SystemExit(f"Refusing symlinked environment file: {path}")
 parent = path.parent.absolute()
@@ -165,7 +173,7 @@ if parent.resolve() != parent:
 metadata = path.stat() if path.exists() else None
 lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 prefix = key + "="
-encoded_value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+encoded_value = value
 done = False
 result = []
 for line in lines:
