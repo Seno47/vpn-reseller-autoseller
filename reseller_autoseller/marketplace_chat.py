@@ -17,7 +17,7 @@ class GgselChatClient:
         api_key: str,
         seller_id: str = "",
         timeout: float = 30.0,
-        base_url: str = "https://api.ggsel.net",
+        base_url: str = "https://seller.ggsel.com",
     ) -> None:
         self.api_key = api_key.strip()
         self.seller_id = seller_id.strip()
@@ -80,7 +80,10 @@ class GgselChatClient:
             raise RuntimeError(f"{label} {response.status_code}: {response.text}")
         if not response.text.strip():
             return {"status": "ok"}
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"{label} returned invalid JSON") from exc
 
     @staticmethod
     def _list_from_response(data: Any) -> list[dict[str, Any]]:

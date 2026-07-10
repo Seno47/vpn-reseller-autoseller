@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -31,6 +32,7 @@ class DigisellerClient:
         self.base_url = base_url.rstrip("/")
         self._token: str | None = None
         self._token_valid_until = 0.0
+        self._token_lock = asyncio.Lock()
 
     @classmethod
     def _next_login_timestamp(cls) -> int:
@@ -41,74 +43,105 @@ class DigisellerClient:
     async def token(self) -> str:
         if self._token and time.time() < self._token_valid_until:
             return self._token
-        if not self.seller_id or not self.api_key:
-            raise DigisellerApiError("Digiseller seller ID/API key are not configured")
-        last_error = "Digiseller login failed"
-        for attempt in range(3):
-            timestamp = self._next_login_timestamp()
-            sign = hashlib.sha256(f"{self.api_key}{timestamp}".encode("utf-8")).hexdigest()
-            payload = {"seller_id": int(self.seller_id), "timestamp": timestamp, "sign": sign}
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/apilogin",
-                    json=payload,
-                    headers={"Accept": "application/json", "Content-Type": "application/json"},
-                )
-            data = self._json(response)
-            if int(data.get("retval", -1)) == 0 and data.get("token"):
-                self._token = str(data["token"])
-                self._token_valid_until = time.time() + 110 * 60
+        async with self._token_lock:
+            if self._token and time.time() < self._token_valid_until:
                 return self._token
-            last_error = str(data.get("desc") or data.get("retdesc") or "Digiseller login failed")
-            if "timestamp" not in last_error.lower() or attempt == 2:
-                break
-            await asyncio.sleep(1.1)
-        raise DigisellerApiError(last_error)
+            if not self.seller_id or not self.api_key:
+                raise DigisellerApiError("Digiseller seller ID/API key are not configured")
+            try:
+                seller_id = int(self.seller_id)
+            except ValueError as exc:
+                raise DigisellerApiError("Digiseller seller ID must be an integer") from exc
+            last_error = "Digiseller login failed"
+            for attempt in range(3):
+                timestamp = self._next_login_timestamp()
+                sign = hashlib.sha256(f"{self.api_key}{timestamp}".encode("utf-8")).hexdigest()
+                payload = {"seller_id": seller_id, "timestamp": timestamp, "sign": sign}
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        response = await client.post(
+                            f"{self.base_url}/apilogin",
+                            json=payload,
+                            headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        )
+                except httpx.HTTPError as exc:
+                    raise DigisellerApiError(f"Cannot reach Digiseller API: {exc}") from exc
+                data = self._json(response)
+                if self._retval(data, default=-1) == 0 and data.get("token"):
+                    self._token = str(data["token"])
+                    self._token_valid_until = time.time() + 110 * 60
+                    return self._token
+                last_error = str(data.get("desc") or data.get("retdesc") or "Digiseller login failed")
+                if "timestamp" not in last_error.lower() or attempt == 2:
+                    break
+                await asyncio.sleep(1.1)
+            raise DigisellerApiError(last_error)
+
+    def _invalidate_token(self, token: str) -> None:
+        if self._token == token:
+            self._token = None
+            self._token_valid_until = 0.0
+
+    async def _authenticated_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        headers = {"Accept": "application/json"}
+        if method.upper() in {"POST", "PUT", "PATCH"}:
+            headers["Content-Type"] = "application/json"
+        for attempt in range(2):
+            token = await self.token()
+            request_params = {**(params or {}), "token": token}
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.request(
+                        method,
+                        f"{self.base_url}{path}",
+                        params=request_params,
+                        json=json,
+                        headers=headers,
+                    )
+            except httpx.HTTPError as exc:
+                raise DigisellerApiError(f"Cannot reach Digiseller API: {exc}") from exc
+            if response.status_code != 401 or attempt == 1:
+                return response
+            self._invalidate_token(token)
+        raise DigisellerApiError("Digiseller authentication failed")
 
     async def purchase_by_unique_code(self, unique_code: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/purchases/unique-code/{unique_code}",
-                params={"token": token},
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request(
+            "GET",
+            f"/purchases/unique-code/{quote(unique_code, safe='')}",
+        )
         data = self._json(response)
-        if int(data.get("retval", -1)) != 0:
+        if self._retval(data, default=-1) != 0:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Invalid unique code"))
         return data
 
     async def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.put(
-                f"{self.base_url}/purchases/unique-code/{unique_code}/deliver",
-                params={"token": token},
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request(
+            "PUT",
+            f"/purchases/unique-code/{quote(unique_code, safe='')}/deliver",
+        )
         data = self._json(response)
-        if int(data.get("retval", -1)) != 0:
+        if self._retval(data, default=-1) not in {0, 4}:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot mark code delivered"))
         return data
 
     async def last_sales(self, *, top: int = 100, group: str = "") -> list[dict[str, Any]]:
-        token = await self.token()
         params: dict[str, Any] = {
             "seller_id": self.seller_id,
             "top": max(1, min(int(top), 1000)),
-            "token": token,
         }
         if group:
             params["group"] = group
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/seller-last-sales",
-                params=params,
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request("GET", "/seller-last-sales", params=params)
         data = self._json_any(response)
-        if isinstance(data, dict) and int(data.get("retval", 0)) != 0:
-            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read last sales"))
+        self._raise_for_retval(data, "Cannot read last sales")
         return self._list_from_response(data)
 
     async def seller_sales(
@@ -121,7 +154,6 @@ class DigisellerClient:
         page: int = 1,
         rows: int = 100,
     ) -> list[dict[str, Any]]:
-        token = await self.token()
         payload: dict[str, Any] = {
             "date_start": date_start,
             "date_finish": date_finish,
@@ -131,47 +163,31 @@ class DigisellerClient:
         }
         if product_ids:
             payload["product_ids"] = product_ids
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/seller-sells/v2",
-                params={"token": token},
-                json=payload,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
+        response = await self._authenticated_request("POST", "/seller-sells/v2", json=payload)
         data = self._json_any(response)
-        if isinstance(data, dict) and int(data.get("retval", 0)) != 0:
-            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read seller sales"))
+        self._raise_for_retval(data, "Cannot read seller sales")
         return self._list_from_response(data)
 
     async def purchase_info(self, invoice_id: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/purchase/info/{invoice_id}",
-                params={"token": token},
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request(
+            "GET",
+            f"/purchase/info/{quote(invoice_id, safe='')}",
+        )
         data = self._json(response)
-        if int(data.get("retval", -1)) != 0:
+        if self._retval(data, default=-1) != 0:
             raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot read purchase info"))
         return data
 
     async def order_chats(self, *, filter_new: bool = True, page: int = 1, rows: int = 100) -> list[dict[str, Any]]:
-        token = await self.token()
         params: dict[str, Any] = {
-            "token": token,
             "page": page,
             "pageSize": rows,
         }
         if filter_new:
             params["filter_new"] = 1
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/debates/v2/chats",
-                params=params,
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request("GET", "/debates/v2/chats", params=params)
         data = self._json_any(response)
+        self._raise_for_retval(data, "Cannot read order chats")
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
         for key in ("chats", "items", "list", "debates"):
@@ -187,63 +203,67 @@ class DigisellerClient:
         newer: bool = False,
         old_id: str = "",
     ) -> list[dict[str, Any]]:
-        token = await self.token()
-        params: dict[str, Any] = {"token": token, "id_i": invoice_id, "count": count}
+        params: dict[str, Any] = {"id_i": invoice_id, "count": count}
         if newer:
             params["newer"] = 1
         if old_id:
             params["old_id"] = old_id
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/debates/v2",
-                params=params,
-                headers={"Accept": "application/json"},
-            )
+        response = await self._authenticated_request("GET", "/debates/v2", params=params)
         data = self._json_any(response)
+        self._raise_for_retval(data, "Cannot read order messages")
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
         if not isinstance(data, dict):
             return []
         if isinstance(data.get("messages"), list):
-            return list(data["messages"])
+            return [item for item in data["messages"] if isinstance(item, dict)]
         if isinstance(data.get("debates"), list):
-            return list(data["debates"])
+            return [item for item in data["debates"] if isinstance(item, dict)]
         if isinstance(data.get("items"), list):
-            return list(data["items"])
+            return [item for item in data["items"] if isinstance(item, dict)]
         if isinstance(data.get("list"), list):
-            return list(data["list"])
+            return [item for item in data["list"] if isinstance(item, dict)]
         return []
 
     async def mark_order_messages_seen(self, invoice_id: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/debates/v2/seen",
-                params={"token": token, "id_i": invoice_id},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-        if response.status_code == 200 and not response.text.strip():
+        response = await self._authenticated_request(
+            "POST",
+            "/debates/v2/seen",
+            params={"id_i": invoice_id},
+        )
+        if 200 <= response.status_code < 300 and not response.text.strip():
             return {"status": "ok"}
         data = self._json(response)
-        if int(data.get("retval", 0)) != 0:
-            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot mark messages seen"))
+        self._raise_for_retval(data, "Cannot mark messages seen")
         return data
 
     async def send_order_message(self, invoice_id: str, message: str) -> dict[str, Any]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/debates/v2/",
-                params={"token": token, "id_i": invoice_id},
-                json={"message": message, "files": []},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-        if response.status_code == 200 and not response.text.strip():
+        response = await self._authenticated_request(
+            "POST",
+            "/debates/v2/",
+            params={"id_i": invoice_id},
+            json={"message": message, "files": []},
+        )
+        if 200 <= response.status_code < 300 and not response.text.strip():
             return {"status": "ok"}
         data = self._json(response)
-        if int(data.get("retval", 0)) != 0:
-            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or "Cannot send message"))
+        self._raise_for_retval(data, "Cannot send message")
         return data
+
+    @staticmethod
+    def _retval(data: dict[str, Any], *, default: int) -> int:
+        raw_value = data.get("retval", default)
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise DigisellerApiError("Digiseller API returned an invalid result code") from exc
+
+    @classmethod
+    def _raise_for_retval(cls, data: Any, fallback: str) -> None:
+        if not isinstance(data, dict) or "retval" not in data:
+            return
+        if cls._retval(data, default=0) != 0:
+            raise DigisellerApiError(str(data.get("retdesc") or data.get("desc") or fallback))
 
     @staticmethod
     def _json(response: httpx.Response) -> dict[str, Any]:

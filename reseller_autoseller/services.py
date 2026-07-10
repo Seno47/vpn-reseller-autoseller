@@ -5,7 +5,8 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import json
 import re
 from string import Template
-from typing import Any
+from typing import Any, Callable
+from weakref import WeakValueDictionary
 
 from reseller_autoseller.db import Database
 from reseller_autoseller.marketplaces import SaleEvent
@@ -411,6 +412,14 @@ QUANTITY_KEYS = {
 }
 
 
+class DeliveryInProgressError(RuntimeError):
+    """Another worker owns the durable claim for this sale or operation."""
+
+
+class MarketplaceMessageError(RuntimeError):
+    """A saved delivery could not be sent to the marketplace chat."""
+
+
 class DeliveryService:
     def __init__(self, *, db: Database, xyranet: Any, messenger: Any | None = None, free_reissue_enabled: Any | None = None) -> None:
         self.db = db
@@ -418,8 +427,19 @@ class DeliveryService:
         self.messenger = messenger
         self.free_reissue_enabled = free_reissue_enabled
         self._tariff_prices_rub: dict[str, Decimal] | None = None
+        self._sale_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._pending_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     async def handle_sale(self, event: SaleEvent, *, notify_marketplace: bool = True) -> dict[str, Any]:
+        lock_key = f"{event.marketplace}:{event.external_order_id}"
+        lock = self._sale_locks.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._sale_locks[lock_key] = lock
+        async with lock:
+            return await self._handle_sale_locked(event, notify_marketplace=notify_marketplace)
+
+    async def _handle_sale_locked(self, event: SaleEvent, *, notify_marketplace: bool) -> dict[str, Any]:
         self.db.add_order_event(
             marketplace=event.marketplace,
             external_order_id=event.external_order_id,
@@ -433,6 +453,14 @@ class DeliveryService:
         )
         existing = self.db.get_sale_with_delivery(event.marketplace, event.external_order_id)
         if existing and existing.get("delivery_id"):
+            if notify_marketplace:
+                await self.ensure_delivery_message_sent(
+                    existing,
+                    marketplace=event.marketplace,
+                    external_order_id=marketplace_chat_order_id(event),
+                    sale_id=int(existing["id"]),
+                )
+                existing = self.db.get_sale_with_delivery(event.marketplace, event.external_order_id) or existing
             self.db.add_order_event(
                 marketplace=event.marketplace,
                 external_order_id=event.external_order_id,
@@ -478,20 +506,73 @@ class DeliveryService:
             payload={"product_mapping_id": product["id"], "action": product.get("action") or "create"},
         )
         pending = self.db.get_pending_operation_by_sale(int(sale["id"]))
-        if pending and pending["status"] == "waiting_order_id":
-            self.db.add_order_event(
-                marketplace=event.marketplace,
-                external_order_id=event.external_order_id,
-                sale_id=int(sale["id"]),
-                pending_operation_id=int(pending["id"]),
-                event_type="pending_replayed",
-                message="Existing pending operation was reused",
-            )
-            return {"status": "waiting_order_id", "delivery_text": self.ask_order_id_text(str(pending["action"])), "sale": sale, "pending": pending}
+        if pending:
+            pending_status = str(pending.get("status") or "")
+            if pending_status == "waiting_order_id":
+                ask_text = self.ask_order_id_text(str(pending["action"]))
+                if notify_marketplace:
+                    await self.ensure_pending_request_message_sent(pending, ask_text)
+                self.db.add_order_event(
+                    marketplace=event.marketplace,
+                    external_order_id=event.external_order_id,
+                    sale_id=int(sale["id"]),
+                    pending_operation_id=int(pending["id"]),
+                    event_type="pending_replayed",
+                    message="Existing pending operation was reused",
+                )
+                return {"status": "waiting_order_id", "delivery_text": ask_text, "sale": sale, "pending": pending}
+            if pending_status == "processing":
+                raise DeliveryInProgressError(f"Pending operation is already being processed: {pending['id']}")
+            if pending_status == "completed" and pending.get("result_text"):
+                return {"status": "duplicate", "delivery_text": str(pending["result_text"]), "sale": sale, "pending": pending}
+            if pending_status == "error":
+                raise RuntimeError(f"Pending operation requires an explicit retry: {pending.get('error_text') or pending['id']}")
 
+        claim_token = self.db.claim_sale_processing(int(sale["id"]))
+        if not claim_token:
+            refreshed = self.db.get_sale_with_delivery_by_id(int(sale["id"]))
+            if refreshed and refreshed.get("delivery_id"):
+                if notify_marketplace:
+                    await self.ensure_delivery_message_sent(
+                        refreshed,
+                        marketplace=event.marketplace,
+                        external_order_id=marketplace_chat_order_id(event),
+                        sale_id=int(refreshed["id"]),
+                    )
+                return {"status": "duplicate", "delivery_text": refreshed["delivery_text"], "sale": refreshed}
+            refreshed_pending = self.db.get_pending_operation_by_sale(int(sale["id"]))
+            if refreshed_pending and refreshed_pending.get("status") == "waiting_order_id":
+                return {
+                    "status": "waiting_order_id",
+                    "delivery_text": self.ask_order_id_text(str(refreshed_pending["action"])),
+                    "sale": sale,
+                    "pending": refreshed_pending,
+                }
+            raise DeliveryInProgressError(f"Sale is already being processed: {event.marketplace}:{event.external_order_id}")
+        try:
+            return await self._process_claimed_sale(
+                event=event,
+                sale=sale,
+                product=product,
+                notify_marketplace=notify_marketplace,
+                claim_token=claim_token,
+            )
+        finally:
+            self.db.release_sale_processing(int(sale["id"]), claim_token)
+
+    async def _process_claimed_sale(
+        self,
+        *,
+        event: SaleEvent,
+        sale: dict[str, Any],
+        product: dict[str, Any],
+        notify_marketplace: bool,
+        claim_token: str,
+    ) -> dict[str, Any]:
         action = str(product.get("action") or "create").strip().lower()
         action_params = self.product_action_params(product)
         idempotency_key = f"{event.marketplace}:{event.external_order_id}"
+        heartbeat = lambda: self.db.refresh_sale_processing(int(sale["id"]), claim_token)
 
         if action != "create":
             target_order_id = extract_target_order_id(event.raw_payload)
@@ -515,7 +596,7 @@ class DeliveryService:
                 )
                 ask_text = self.ask_order_id_text(action)
                 if notify_marketplace:
-                    await self.send_marketplace_message(event.marketplace, marketplace_chat_order_id(event), ask_text)
+                    await self.ensure_pending_request_message_sent(pending, ask_text)
                 return {"status": "waiting_order_id", "delivery_text": ask_text, "sale": sale, "pending": pending}
             return await self.complete_operation(
                 sale=sale,
@@ -525,6 +606,8 @@ class DeliveryService:
                 target_order_id=target_order_id,
                 idempotency_key=idempotency_key,
                 message_order_id=marketplace_chat_order_id(event),
+                heartbeat=heartbeat,
+                notify_marketplace=notify_marketplace,
             )
 
         quantity = sale_quantity(event.raw_payload)
@@ -535,17 +618,25 @@ class DeliveryService:
             event_type="xyranet_create_started",
             payload={"tariff_code": product["tariff_code"], "quantity": quantity},
         )
+        if not heartbeat():
+            raise DeliveryInProgressError("Sale processing claim was lost")
         api_response = await self.xyranet.create_order(product["tariff_code"], idempotency_key=idempotency_key)
+        if not heartbeat():
+            raise DeliveryInProgressError("Sale processing claim was lost")
         delivery = extract_order_delivery(api_response)
         if not delivery["order_id"] or not delivery["subscription_url"]:
             raise ValueError("XyraNet response does not contain order_id or subscription_url")
         renew_responses: list[dict[str, Any]] = []
         for item_number in range(2, quantity + 1):
+            if not heartbeat():
+                raise DeliveryInProgressError("Sale processing claim was lost")
             renew_response = await self.xyranet.renew_order(
                 delivery["order_id"],
                 product.get("tariff_code") or None,
                 idempotency_key=f"{idempotency_key}:quantity-renew:{item_number}",
             )
+            if not heartbeat():
+                raise DeliveryInProgressError("Sale processing claim was lost")
             renew_responses.append(renew_response)
             renewed_delivery = extract_order_delivery(renew_response)
             delivery = {**delivery, **{key: value for key, value in renewed_delivery.items() if value}}
@@ -579,6 +670,7 @@ class DeliveryService:
                 "subscription_url": delivery["subscription_url"],
                 "panel_username": delivery["panel_username"],
                 "tariff_code": delivery["tariff_code"],
+                "action": "create",
                 "delivery_text": delivery_text,
                 "raw_response": raw_response,
             },
@@ -592,45 +684,105 @@ class DeliveryService:
             payload={"delivery_id": saved["id"], "xyranet_order_id": delivery["order_id"]},
         )
         if notify_marketplace:
-            await self.send_marketplace_message(event.marketplace, marketplace_chat_order_id(event), delivery_text)
+            await self.ensure_delivery_message_sent(
+                saved,
+                marketplace=event.marketplace,
+                external_order_id=marketplace_chat_order_id(event),
+                sale_id=int(sale["id"]),
+            )
         return {"status": "delivered", "delivery_text": delivery_text, "sale": sale, "delivery": saved}
 
     async def complete_pending_operation(self, pending: dict[str, Any], target_order_id: str) -> dict[str, Any]:
-        sale = self.db.get_sale_with_delivery(str(pending["marketplace"]), str(pending["external_order_id"]))
-        if not sale:
-            raise ValueError("Pending sale was not found")
-        product = self.db.get_product_by_external(
-            str(sale["marketplace"]),
-            str(sale["external_product_id"]),
-            str(sale.get("external_variant_id") or ""),
-        )
-        if not product:
-            raise ValueError("Pending product mapping was not found")
-        result = await self.complete_operation(
-            sale=sale,
-            product=product,
-            action=str(pending["action"]),
-            action_params=json.loads(str(pending.get("action_params") or "{}")),
-            target_order_id=target_order_id,
-            idempotency_key=f"{pending['marketplace']}:{pending['external_order_id']}:pending:{pending['id']}",
-            message_order_id=str(pending["external_order_id"]),
-        )
-        self.db.complete_pending_operation(
-            int(pending["id"]),
-            target_order_id=target_order_id,
-            result_text=result["delivery_text"],
-            raw_response=result.get("raw_response") or {},
-        )
+        operation_id = int(pending["id"])
+        lock = self._pending_locks.get(operation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._pending_locks[operation_id] = lock
+        async with lock:
+            return await self._complete_pending_operation_locked(pending, target_order_id)
+
+    async def _complete_pending_operation_locked(self, pending: dict[str, Any], target_order_id: str) -> dict[str, Any]:
+        current = self.db.get_pending_operation(int(pending["id"])) or pending
+        if str(current.get("status") or "") == "completed":
+            sale = self.db.get_sale_with_delivery_by_id(int(current["sale_id"]))
+            if not sale or not sale.get("delivery_id"):
+                raise ValueError("Completed pending operation has no saved delivery")
+            await self.ensure_delivery_message_sent(
+                sale,
+                marketplace=str(current["marketplace"]),
+                external_order_id=str(current["external_order_id"]),
+                sale_id=int(current["sale_id"]),
+            )
+            raw_response = parse_json_object(sale.get("delivery_raw_response"))
+            return {
+                "status": "duplicate",
+                "delivery_text": str(sale.get("delivery_text") or ""),
+                "sale": sale,
+                "delivery": sale,
+                "raw_response": raw_response,
+                "pending": current,
+            }
+
+        claimed = self.db.claim_pending_operation(int(current["id"]), target_order_id=target_order_id)
+        if not claimed:
+            raise DeliveryInProgressError(f"Pending operation is already being processed: {current['id']}")
+        claim_token = str(claimed["processing_token"])
+        heartbeat = lambda: self.db.refresh_pending_processing(int(claimed["id"]), claim_token)
+        try:
+            sale = self.db.get_sale_with_delivery_by_id(int(claimed["sale_id"]))
+            if not sale:
+                raise ValueError("Pending sale was not found")
+            if sale.get("delivery_id"):
+                await self.ensure_delivery_message_sent(
+                    sale,
+                    marketplace=str(claimed["marketplace"]),
+                    external_order_id=str(claimed["external_order_id"]),
+                    sale_id=int(claimed["sale_id"]),
+                )
+                raw_response = parse_json_object(sale.get("delivery_raw_response"))
+                result = {
+                    "status": "delivered",
+                    "delivery_text": str(sale.get("delivery_text") or ""),
+                    "sale": sale,
+                    "delivery": sale,
+                    "raw_response": raw_response,
+                }
+            else:
+                product = self.db.get_product(int(claimed["product_mapping_id"]))
+                if not product:
+                    raise ValueError("Pending product mapping was not found")
+                result = await self.complete_operation(
+                    sale=sale,
+                    product=product,
+                    action=str(claimed["action"]),
+                    action_params=parse_json_object(claimed.get("action_params")),
+                    target_order_id=target_order_id,
+                    idempotency_key=f"{claimed['marketplace']}:{claimed['external_order_id']}:pending:{claimed['id']}",
+                    message_order_id=str(claimed["external_order_id"]),
+                    heartbeat=heartbeat,
+                )
+            completed = self.db.complete_pending_operation(
+                int(claimed["id"]),
+                target_order_id=target_order_id,
+                result_text=result["delivery_text"],
+                raw_response=result.get("raw_response") or {},
+                claim_token=claim_token,
+            )
+            if not completed:
+                raise DeliveryInProgressError("Pending operation claim was lost before completion")
+        except Exception as exc:
+            self.db.fail_pending_operation(int(claimed["id"]), str(exc), claim_token=claim_token)
+            raise
         self.db.add_order_event(
-            marketplace=str(pending["marketplace"]),
-            external_order_id=str(pending["external_order_id"]),
-            sale_id=int(pending["sale_id"]),
-            pending_operation_id=int(pending["id"]),
+            marketplace=str(claimed["marketplace"]),
+            external_order_id=str(claimed["external_order_id"]),
+            sale_id=int(claimed["sale_id"]),
+            pending_operation_id=int(claimed["id"]),
             event_type="pending_completed",
             status="success",
-            payload={"target_order_id": target_order_id, "action": pending["action"]},
+            payload={"target_order_id": target_order_id, "action": claimed["action"]},
         )
-        return {**result, "pending": pending}
+        return {**result, "pending": completed}
 
     async def complete_operation(
         self,
@@ -642,7 +794,13 @@ class DeliveryService:
         target_order_id: str,
         idempotency_key: str,
         message_order_id: str | None = None,
+        heartbeat: Callable[[], bool] | None = None,
+        notify_marketplace: bool = True,
     ) -> dict[str, Any]:
+        def refresh_claim() -> None:
+            if heartbeat is not None and not heartbeat():
+                raise DeliveryInProgressError("Operation processing claim was lost")
+
         if action == "renew":
             self.db.add_order_event(
                 marketplace=str(sale["marketplace"]),
@@ -651,6 +809,7 @@ class DeliveryService:
                 event_type="xyranet_operation_started",
                 payload={"action": action, "target_order_id": target_order_id},
             )
+            refresh_claim()
             response = await self.xyranet.renew_order(
                 target_order_id,
                 product.get("tariff_code") or None,
@@ -658,6 +817,7 @@ class DeliveryService:
             )
             delivery = extract_order_delivery(response)
             text = self.render_action_text("renew", {**delivery, "order_id": target_order_id})
+            refresh_claim()
             raw_response = with_statistics_expense(
                 response,
                 await self.estimate_subscription_expense(product.get("tariff_code") or "", 1),
@@ -670,7 +830,9 @@ class DeliveryService:
                 event_type="xyranet_operation_started",
                 payload={"action": action, "target_order_id": target_order_id},
             )
+            refresh_claim()
             response = await self.xyranet.reissue_order(target_order_id, idempotency_key=idempotency_key)
+            refresh_claim()
             delivery = extract_order_delivery(response)
             text = self.render_action_text("reissue", {**delivery, "order_id": target_order_id})
             raw_response = with_statistics_expense(response, Decimal("0"))
@@ -682,8 +844,11 @@ class DeliveryService:
                 event_type="xyranet_operation_started",
                 payload={"action": action, "target_order_id": target_order_id, "action_params": action_params},
             )
+            refresh_claim()
             quote = await self.safe_operation_quote("traffic", target_order_id, action_params)
+            refresh_claim()
             response = await self.xyranet.traffic_purchase(target_order_id, action_params, idempotency_key=idempotency_key)
+            refresh_claim()
             delivery = extract_order_delivery(response)
             text = self.render_action_text("traffic", {**delivery, "order_id": target_order_id, "lte_quota": lte_quota_from_action(action_params)})
             raw_response = with_statistics_expense({"quote": quote, "purchase": response}, expense_from_raw_response(response) or expense_from_raw_response(quote))
@@ -695,8 +860,11 @@ class DeliveryService:
                 event_type="xyranet_operation_started",
                 payload={"action": action, "target_order_id": target_order_id, "action_params": action_params},
             )
+            refresh_claim()
             quote = await self.safe_operation_quote("ip_limit", target_order_id, action_params)
+            refresh_claim()
             response = await self.xyranet.ip_limit_purchase(target_order_id, action_params, idempotency_key=idempotency_key)
+            refresh_claim()
             delivery = extract_order_delivery(response)
             text = self.render_action_text("ip_limit", {**delivery, "order_id": target_order_id})
             raw_response = with_statistics_expense({"quote": quote, "purchase": response}, expense_from_raw_response(response) or expense_from_raw_response(quote))
@@ -711,6 +879,7 @@ class DeliveryService:
                 "subscription_url": delivery.get("subscription_url") or "",
                 "panel_username": delivery.get("panel_username") or "",
                 "tariff_code": delivery.get("tariff_code") or str(product.get("tariff_code") or ""),
+                "action": action,
                 "delivery_text": text,
                 "raw_response": raw_response,
             },
@@ -723,16 +892,115 @@ class DeliveryService:
             status="success",
             payload={"delivery_id": saved["id"], "xyranet_order_id": target_order_id, "action": action},
         )
-        await self.send_marketplace_message(str(sale["marketplace"]), message_order_id or str(sale["external_order_id"]), text)
+        if notify_marketplace:
+            await self.ensure_delivery_message_sent(
+                saved,
+                marketplace=str(sale["marketplace"]),
+                external_order_id=message_order_id or str(sale["external_order_id"]),
+                sale_id=int(sale["id"]),
+            )
         return {"status": "delivered", "delivery_text": text, "sale": sale, "delivery": saved, "raw_response": raw_response}
 
-    async def send_marketplace_message(self, marketplace: str, external_order_id: str, text: str) -> None:
+    async def ensure_pending_request_message_sent(self, pending: dict[str, Any], text: str) -> bool:
+        operation_id = int(pending["id"])
+        latest = self.db.get_pending_operation(operation_id)
+        if not latest:
+            raise ValueError("Pending operation was not found")
+        if str(latest.get("request_message_status") or "") == "sent":
+            return True
+        claim_token = self.db.claim_pending_request_message(operation_id)
+        if not claim_token:
+            latest = self.db.get_pending_operation(operation_id)
+            if latest and str(latest.get("request_message_status") or "") == "sent":
+                return True
+            raise DeliveryInProgressError(f"Pending request message is already being sent: {operation_id}")
+        marketplace = str(latest["marketplace"])
+        external_order_id = str(latest["external_order_id"])
+        sent = await self.send_marketplace_message(marketplace, external_order_id, text)
+        if sent:
+            if not self.db.mark_pending_request_message_sent(operation_id, claim_token):
+                raise DeliveryInProgressError(f"Pending request message claim was lost: {operation_id}")
+            pending["request_message_status"] = "sent"
+            self.db.add_order_event(
+                marketplace=marketplace,
+                external_order_id=external_order_id,
+                sale_id=int(latest["sale_id"]),
+                pending_operation_id=operation_id,
+                event_type="pending_request_message_sent",
+                status="success",
+            )
+            return True
+        error_text = "Marketplace messenger returned false"
+        self.db.mark_pending_request_message_failed(operation_id, claim_token, error_text)
+        self.db.add_order_event(
+            marketplace=marketplace,
+            external_order_id=external_order_id,
+            sale_id=int(latest["sale_id"]),
+            pending_operation_id=operation_id,
+            event_type="pending_request_message_failed",
+            status="error",
+            message=error_text,
+        )
+        raise MarketplaceMessageError(error_text)
+
+    async def ensure_delivery_message_sent(
+        self,
+        delivery: dict[str, Any],
+        *,
+        marketplace: str,
+        external_order_id: str,
+        sale_id: int | None = None,
+    ) -> bool:
+        delivery_id = int(delivery.get("delivery_id") or delivery.get("id") or 0)
+        if not delivery_id:
+            raise ValueError("Saved delivery has no delivery ID")
+        latest = self.db.get_delivery(delivery_id)
+        if not latest:
+            raise ValueError("Saved delivery was not found")
+        if str(latest.get("marketplace_message_status") or "") == "sent":
+            return True
+        claim_token = self.db.claim_delivery_message(delivery_id)
+        if not claim_token:
+            latest = self.db.get_delivery(delivery_id)
+            if latest and str(latest.get("marketplace_message_status") or "") == "sent":
+                return True
+            raise DeliveryInProgressError(f"Marketplace delivery message is already being sent: {delivery_id}")
+        text = str(latest.get("delivery_text") or delivery.get("delivery_text") or "")
+        sent = await self.send_marketplace_message(marketplace, external_order_id, text)
+        if sent:
+            if not self.db.mark_delivery_message_sent(delivery_id, claim_token):
+                raise DeliveryInProgressError(f"Marketplace delivery message claim was lost: {delivery_id}")
+            delivery["marketplace_message_status"] = "sent"
+            self.db.add_order_event(
+                marketplace=marketplace,
+                external_order_id=external_order_id,
+                sale_id=sale_id,
+                event_type="marketplace_message_sent",
+                status="success",
+                payload={"delivery_id": delivery_id},
+            )
+            return True
+        error_text = "Marketplace messenger returned false"
+        self.db.mark_delivery_message_failed(delivery_id, claim_token, error_text)
+        self.db.add_order_event(
+            marketplace=marketplace,
+            external_order_id=external_order_id,
+            sale_id=sale_id,
+            event_type="marketplace_message_failed",
+            status="error",
+            message=error_text,
+            payload={"delivery_id": delivery_id},
+        )
+        raise MarketplaceMessageError(error_text)
+
+    async def send_marketplace_message(self, marketplace: str, external_order_id: str, text: str) -> bool:
         if not self.messenger:
-            return
+            return True
         try:
-            await asyncio.wait_for(self.messenger.send_message(marketplace, external_order_id, text), timeout=5)
+            result = await asyncio.wait_for(self.messenger.send_message(marketplace, external_order_id, text), timeout=5)
+            return result is not False
         except Exception:
-            return
+            return False
 
     def is_free_reissue_enabled(self) -> bool:
         if self.free_reissue_enabled is None:
@@ -967,9 +1235,21 @@ class DeliveryService:
         return context
 
 
+def parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def extract_order_delivery(response: dict[str, Any]) -> dict[str, str]:
-    order = response.get("order") or {}
-    subscription = order.get("subscription") or {}
+    raw_order = response.get("order") if isinstance(response, dict) else None
+    order = raw_order if isinstance(raw_order, dict) else {}
+    raw_subscription = order.get("subscription")
+    subscription = raw_subscription if isinstance(raw_subscription, dict) else {}
     return {
         "order_id": str(order.get("order_id") or ""),
         "panel_username": str(order.get("panel_username") or ""),
@@ -996,10 +1276,7 @@ def extract_target_order_id(payload: dict[str, Any]) -> str:
         "vpn_order_id",
     }
     found = _extract_key_recursive(payload, keys)
-    if found:
-        return found
-    text = json.dumps(payload, ensure_ascii=False)
-    return extract_order_id_from_text(text)
+    return found
 
 
 def clean_order_id(value: str) -> str:

@@ -16,7 +16,7 @@ STATS_PERIODS = {
     "all": "Всё время",
 }
 
-RUB_ALIASES = {"rub", "rur", "₽", "руб", "руб."}
+RUB_ALIASES = {"rub", "rur", "wmr", "₽", "руб", "руб."}
 MONEY_KEYS = (
     "statistics_expense_rub",
     "api_price_rub",
@@ -171,6 +171,7 @@ def empty_group() -> dict[str, Any]:
         "delivered_count": 0,
         "pending_count": 0,
         "revenue_by_currency": defaultdict(Decimal),
+        "rub_sales_count": 0,
         "expense_rub": Decimal("0"),
         "expense_unknown_count": 0,
     }
@@ -184,6 +185,8 @@ def add_to_group(group: dict[str, Any], *, delivered: bool, amount: Decimal, cur
         group["pending_count"] += 1
     if amount:
         group["revenue_by_currency"][currency] += amount
+    if currency == "RUB":
+        group["rub_sales_count"] += 1
     group["expense_rub"] += expense
     if delivered and not expense_known:
         group["expense_unknown_count"] += 1
@@ -241,7 +244,7 @@ def build_sales_statistics(rows: list[dict[str, Any]], *, period: str = "30d") -
     revenue_rub = total["revenue_by_currency"].get("RUB", Decimal("0"))
     expense = total["expense_rub"]
     profit = revenue_rub - expense
-    avg_order = revenue_rub / total["sales_count"] if total["sales_count"] else Decimal("0")
+    avg_order = revenue_rub / total["rub_sales_count"] if total["rub_sales_count"] else Decimal("0")
 
     return {
         "period": {

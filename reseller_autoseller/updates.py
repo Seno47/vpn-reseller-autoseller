@@ -93,6 +93,17 @@ def current_git_commit(app_root: Path) -> str:
     return result.stdout.strip()
 
 
+def git_commits_match(first: str, second: str) -> bool:
+    left = str(first or "").strip().lower()
+    right = str(second or "").strip().lower()
+    if not left or not right:
+        return False
+    git_sha = re.compile(r"^[0-9a-f]{7,64}$")
+    if git_sha.fullmatch(left) and git_sha.fullmatch(right):
+        return left.startswith(right) or right.startswith(left)
+    return left == right
+
+
 class UpdateManager:
     def __init__(self, *, settings: Settings, db: Database, app_root: Path | None = None) -> None:
         self.settings = settings
@@ -220,7 +231,7 @@ class UpdateManager:
             "latest_version": "",
             "latest_commit": latest_commit,
             "latest_url": f"https://github.com/{owner}/{name}/commits/{self.settings.app_update_branch}",
-            "available": bool(current_commit and latest_commit and not latest_commit.startswith(current_commit)),
+            "available": bool(current_commit and latest_commit and not git_commits_match(current_commit, latest_commit)),
             "error": "" if current_commit else "Current commit is unknown; release tags are recommended.",
         }
 
@@ -233,13 +244,15 @@ class UpdateManager:
         return str(data.get("sha") or "")[:12]
 
     def write_cache(self, payload: dict[str, Any]) -> None:
+        values: dict[str, str] = {}
         for name, key in UPDATE_CACHE_KEYS.items():
             if name in {"last_request_id", "last_request_at"}:
                 continue
             value = payload.get(name, "")
             if isinstance(value, bool):
                 value = "true" if value else "false"
-            self.db.set_setting(key, str(value or ""))
+            values[key] = str(value or "")
+        self.db.set_settings(values)
 
     def read_host_status(self) -> dict[str, Any]:
         path = self.status_file
@@ -256,8 +269,6 @@ class UpdateManager:
         request = {
             "request_id": request_id,
             "requested_at": utcnow(),
-            "repo_url": self.settings.app_update_repo_url,
-            "branch": self.settings.app_update_branch,
             "current_version": self.current_version,
             "current_commit": self.current_commit,
         }

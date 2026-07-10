@@ -10,12 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
-    app_port: int = 8095
+    app_port: int = Field(default=8095, ge=1, le=65535)
     app_base_url: str = "http://127.0.0.1:8095"
 
     xyranet_api_base_url: str = "https://xyranet.pro/api/wholesale"
     xyranet_api_key: str = ""
-    xyranet_timeout_seconds: float = 30.0
+    xyranet_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
 
     digiseller_seller_id: str = ""
     digiseller_api_key: str = ""
@@ -25,8 +25,8 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     admin_ids: list[int] = Field(default_factory=list)
-    admin_username: str = "admin"
-    admin_password: str = "change-me"
+    admin_username: str = Field(default="admin", min_length=1, max_length=100)
+    admin_password: str = Field(default="change-me", max_length=200)
 
     database_path: str = "data/reseller.sqlite3"
     panel_language: str = "ru"
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     notify_daily_statistics: bool = False
     free_reissue_enabled: bool = True
     digiseller_unique_code_request_enabled: bool = True
-    digiseller_unique_code_request_delay_minutes: float = 5.0
+    digiseller_unique_code_request_delay_minutes: float = Field(default=5.0, ge=0, le=24 * 60)
     digiseller_notification_secret: str = ""
     digiseller_sale_notifications_enabled: bool = True
     digiseller_message_notifications_enabled: bool = True

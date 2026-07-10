@@ -1,6 +1,6 @@
 import unittest
 
-from reseller_autoseller.marketplaces import normalize_sale
+from reseller_autoseller.marketplaces import normalize_marketplace, normalize_sale
 
 
 class MarketplaceNormalizeTests(unittest.TestCase):
@@ -40,6 +40,9 @@ class MarketplaceNormalizeTests(unittest.TestCase):
     def test_rejects_unsupported_marketplace(self) -> None:
         with self.assertRaises(ValueError):
             normalize_sale("shopify", {"order_id": "1", "product_id": "2"})
+
+    def test_digiseller_alias_uses_canonical_plati_marketplace(self) -> None:
+        self.assertEqual(normalize_marketplace("digiseller"), "plati")
 
 
 if __name__ == "__main__":

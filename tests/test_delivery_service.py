@@ -8,6 +8,8 @@ from reseller_autoseller.db import Database
 from reseller_autoseller.marketplaces import SaleEvent
 from reseller_autoseller.services import (
     TEMPLATE_GROUPS,
+    DeliveryInProgressError,
+    MarketplaceMessageError,
     DeliveryService,
     extract_order_id_from_text,
     parse_chat_command,
@@ -79,6 +81,26 @@ class FakeMessenger:
 
     async def send_message(self, marketplace: str, external_order_id: str, text: str) -> None:
         self.messages.append((marketplace, external_order_id, text))
+
+
+class OutcomeMessenger(FakeMessenger):
+    def __init__(self, outcomes: list[bool]) -> None:
+        super().__init__()
+        self.outcomes = list(outcomes)
+
+    async def send_message(self, marketplace: str, external_order_id: str, text: str) -> bool:
+        self.messages.append((marketplace, external_order_id, text))
+        return self.outcomes.pop(0) if self.outcomes else True
+
+
+class SlowXyraClient(FakeXyraClient):
+    async def create_order(self, tariff_code: str, *, idempotency_key: str):
+        await asyncio.sleep(0.05)
+        return await super().create_order(tariff_code, idempotency_key=idempotency_key)
+
+    async def renew_order(self, order_id: str, tariff_code: str | None = None, *, idempotency_key: str):
+        await asyncio.sleep(0.05)
+        return await super().renew_order(order_id, tariff_code, idempotency_key=idempotency_key)
 
 
 class DeliveryServiceTests(unittest.TestCase):
@@ -247,6 +269,28 @@ class DeliveryServiceTests(unittest.TestCase):
             self.assertEqual(stats["totals"]["expense_rub"]["text"], "113")
             self.assertEqual(stats["totals"]["profit_rub"]["text"], "186")
 
+    def test_average_rub_order_ignores_sales_in_other_currencies(self) -> None:
+        rows = [
+            {
+                "created_at": "2026-07-10T10:00:00+00:00",
+                "amount": "300",
+                "currency": "WMR",
+                "marketplace": "plati",
+            },
+            {
+                "created_at": "2026-07-10T10:01:00+00:00",
+                "amount": "10",
+                "currency": "USD",
+                "marketplace": "ggsel",
+            },
+        ]
+
+        stats = build_sales_statistics(rows, period="all")
+
+        self.assertEqual(stats["totals"]["sales_count"], 2)
+        self.assertEqual(stats["totals"]["revenue_rub"]["text"], "300")
+        self.assertEqual(stats["totals"]["avg_order_rub"]["text"], "300")
+
     def test_delivery_is_idempotent(self) -> None:
         async def scenario() -> None:
             with TemporaryDirectory() as tmp:
@@ -362,6 +406,302 @@ class DeliveryServiceTests(unittest.TestCase):
                 self.assertIn("xyra-order-1", result["delivery_text"])
                 self.assertIn("lite_monthly", result["delivery_text"])
                 self.assertIn("https://x.example/sub-status", result["delivery_text"])
+
+        asyncio.run(scenario())
+
+    def test_failed_delivery_message_retries_saved_delivery_only_once(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "ggsel",
+                        "external_product_id": "p1",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                client = FakeXyraClient()
+                messenger = OutcomeMessenger([False, True])
+                service = DeliveryService(db=db, xyranet=client, messenger=messenger)
+                event = SaleEvent("ggsel", "o1", "p1", "", None, None, None, None, {})
+
+                with self.assertRaises(MarketplaceMessageError):
+                    await service.handle_sale(event)
+                unsent = db.get_sale_with_delivery("ggsel", "o1")
+                self.assertEqual(unsent["marketplace_message_status"], "pending")
+
+                retried = await service.handle_sale(event)
+                duplicate = await service.handle_sale(event)
+
+                self.assertEqual(retried["status"], "duplicate")
+                self.assertEqual(duplicate["status"], "duplicate")
+                self.assertEqual(client.calls, 1)
+                self.assertEqual(len(messenger.messages), 2)
+                sent = db.get_sale_with_delivery("ggsel", "o1")
+                self.assertEqual(sent["marketplace_message_status"], "sent")
+
+        asyncio.run(scenario())
+
+    def test_concurrent_duplicate_sale_runs_external_operation_once(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "ggsel",
+                        "external_product_id": "p1",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                client = SlowXyraClient()
+                messenger = FakeMessenger()
+                service = DeliveryService(db=db, xyranet=client, messenger=messenger)
+                event = SaleEvent("ggsel", "o1", "p1", "", None, None, None, None, {})
+
+                results = await asyncio.gather(service.handle_sale(event), service.handle_sale(event))
+
+                self.assertEqual({item["status"] for item in results}, {"delivered", "duplicate"})
+                self.assertEqual(client.calls, 1)
+                self.assertEqual(len(messenger.messages), 1)
+
+        asyncio.run(scenario())
+
+    def test_digiseller_pending_uses_sale_id_not_chat_invoice_id(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                client = FakeXyraClient()
+                service = DeliveryService(db=db, xyranet=client)
+                event = SaleEvent(
+                    "plati",
+                    "296100001:ABCDEFGHIJKLMNOP",
+                    "p-renew",
+                    "",
+                    None,
+                    None,
+                    None,
+                    None,
+                    {"inv": "296100001", "unique_code": "ABCDEFGHIJKLMNOP"},
+                )
+
+                waiting = await service.handle_sale(event, notify_marketplace=False)
+                result = await service.complete_pending_operation(waiting["pending"], "xyra-order-1")
+
+                self.assertEqual(result["status"], "delivered")
+                self.assertEqual(client.calls, 1)
+                self.assertEqual(db.get_pending_operation(waiting["pending"]["id"])["status"], "completed")
+
+        asyncio.run(scenario())
+
+    def test_concurrent_pending_completion_runs_external_operation_once(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                client = SlowXyraClient()
+                messenger = FakeMessenger()
+                service = DeliveryService(db=db, xyranet=client, messenger=messenger)
+                event = SaleEvent("plati", "o1", "p-renew", "", None, None, None, None, {"inv": "o1"})
+                pending = (await service.handle_sale(event, notify_marketplace=False))["pending"]
+
+                results = await asyncio.gather(
+                    service.complete_pending_operation(pending, "xyra-order-1"),
+                    service.complete_pending_operation(pending, "xyra-order-1"),
+                )
+
+                self.assertEqual({item["status"] for item in results}, {"delivered", "duplicate"})
+                self.assertEqual(client.calls, 1)
+                self.assertEqual(len(messenger.messages), 1)
+
+        asyncio.run(scenario())
+
+    def test_cross_service_pending_claim_cannot_be_cleared_by_loser(self) -> None:
+        class BlockingMessenger(FakeMessenger):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_message(self, marketplace: str, external_order_id: str, text: str) -> bool:
+                self.messages.append((marketplace, external_order_id, text))
+                self.started.set()
+                await self.release.wait()
+                return True
+
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                client = FakeXyraClient()
+                messenger = BlockingMessenger()
+                first_service = DeliveryService(db=db, xyranet=client, messenger=messenger)
+                second_service = DeliveryService(db=db, xyranet=client, messenger=messenger)
+                event = SaleEvent("plati", "o1", "p-renew", "", None, None, None, None, {"inv": "o1"})
+                pending = (await first_service.handle_sale(event, notify_marketplace=False))["pending"]
+
+                first = asyncio.create_task(first_service.complete_pending_operation(pending, "xyra-order-1"))
+                await messenger.started.wait()
+                with self.assertRaises(DeliveryInProgressError):
+                    await second_service.complete_pending_operation(pending, "xyra-order-1")
+                processing = db.get_pending_operation(int(pending["id"]))
+                self.assertEqual(processing["status"], "processing")
+                self.assertTrue(processing["processing_token"])
+
+                messenger.release.set()
+                completed = await first
+
+                self.assertEqual(completed["status"], "delivered")
+                self.assertEqual(client.calls, 1)
+                self.assertEqual(len(messenger.messages), 1)
+                self.assertEqual(db.get_pending_operation(int(pending["id"]))["status"], "completed")
+
+        asyncio.run(scenario())
+
+    def test_stale_pending_claim_recovers_after_worker_restart(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                first_service = DeliveryService(db=db, xyranet=FakeXyraClient())
+                event = SaleEvent("plati", "o1", "p-renew", "", None, None, None, None, {"inv": "o1"})
+                pending = (await first_service.handle_sale(event, notify_marketplace=False))["pending"]
+                claimed = db.claim_pending_operation(int(pending["id"]), target_order_id="xyra-order-1")
+                self.assertIsNotNone(claimed)
+                with db.connect() as conn:
+                    conn.execute(
+                        "UPDATE pending_operations SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                        (pending["id"],),
+                    )
+
+                recovered = db.recover_stale_pending_operations(stale_after_seconds=60)
+                self.assertEqual(len(recovered), 1)
+                self.assertEqual(recovered[0]["target_order_id"], "xyra-order-1")
+
+                restarted_client = FakeXyraClient()
+                restarted_service = DeliveryService(db=db, xyranet=restarted_client)
+                result = await restarted_service.complete_pending_operation(recovered[0], recovered[0]["target_order_id"])
+
+                self.assertEqual(result["status"], "delivered")
+                self.assertEqual(restarted_client.calls, 1)
+                self.assertEqual(db.get_pending_operation(int(pending["id"]))["status"], "completed")
+
+        asyncio.run(scenario())
+
+    def test_failed_pending_prompt_is_retried_without_duplicate_after_success(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                messenger = OutcomeMessenger([False, True])
+                service = DeliveryService(db=db, xyranet=FakeXyraClient(), messenger=messenger)
+                event = SaleEvent("plati", "o1", "p-renew", "", None, None, None, None, {"inv": "o1"})
+
+                with self.assertRaises(MarketplaceMessageError):
+                    await service.handle_sale(event)
+                retried = await service.handle_sale(event)
+                duplicate = await service.handle_sale(event)
+
+                self.assertEqual(retried["status"], "waiting_order_id")
+                self.assertEqual(duplicate["status"], "waiting_order_id")
+                self.assertEqual(len(messenger.messages), 2)
+                pending = db.get_pending_operation_by_sale(int(retried["sale"]["id"]))
+                self.assertEqual(pending["request_message_status"], "sent")
+
+        asyncio.run(scenario())
+
+    def test_notify_marketplace_false_does_not_send_direct_action_delivery(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "plati",
+                        "external_product_id": "p-renew",
+                        "action": "renew",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                messenger = FakeMessenger()
+                service = DeliveryService(db=db, xyranet=FakeXyraClient(), messenger=messenger)
+                event = SaleEvent(
+                    "plati",
+                    "o1",
+                    "p-renew",
+                    "",
+                    None,
+                    None,
+                    None,
+                    None,
+                    {"inv": "o1", "target_order_id": "xyra-order-1"},
+                )
+
+                result = await service.handle_sale(event, notify_marketplace=False)
+
+                self.assertEqual(result["status"], "delivered")
+                self.assertEqual(messenger.messages, [])
+                saved = db.get_sale_with_delivery("plati", "o1")
+                self.assertEqual(saved["marketplace_message_status"], "pending")
+
+        asyncio.run(scenario())
+
+    def test_malformed_nested_order_response_becomes_controlled_value_error(self) -> None:
+        class MalformedXyra(FakeXyraClient):
+            async def create_order(self, tariff_code: str, *, idempotency_key: str):
+                return {"order": []}
+
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product({"marketplace": "ggsel", "external_product_id": "p1", "tariff_code": "lite_monthly"})
+                service = DeliveryService(db=db, xyranet=MalformedXyra())
+
+                with self.assertRaisesRegex(ValueError, "does not contain order_id"):
+                    await service.handle_sale(SaleEvent("ggsel", "o1", "p1", "", None, None, None, None, {}))
 
         asyncio.run(scenario())
 

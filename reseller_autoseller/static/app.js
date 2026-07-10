@@ -292,7 +292,6 @@ let productRows = [];
 let editingProductId = null;
 let defaultDeliveryTemplate = "";
 let deliveryTemplateVariables = [];
-let deliveryTemplateActions = [];
 let deliveryTemplateGroups = [];
 let complexVariables = [];
 let ordinaryComplexVariableSources = [];
@@ -326,8 +325,21 @@ async function api(path, options = {}) {
     headers: authHeaders(options.headers || {}),
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    const responseText = await response.text();
+    let message = responseText;
+    try {
+      const payload = JSON.parse(responseText);
+      if (typeof payload?.detail === "string") {
+        message = payload.detail;
+      } else if (Array.isArray(payload?.detail)) {
+        message = payload.detail.map((item) => item?.msg || String(item)).join("; ");
+      }
+    } catch (_) {
+      // Keep the plain-text response returned by non-JSON endpoints.
+    }
+    const error = new Error(message || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) {
     return null;
@@ -404,7 +416,6 @@ function insertAtCursor(textarea, value) {
 function renderTemplateVariables(config) {
   defaultDeliveryTemplate = config.default_template || "";
   deliveryTemplateVariables = Array.isArray(config.variables) ? config.variables : [];
-  deliveryTemplateActions = Array.isArray(config.actions) ? config.actions : [];
   deliveryTemplateGroups = Array.isArray(config.action_groups) ? config.action_groups : [];
   templateVariableButtons.innerHTML = deliveryTemplateVariables.map((item) => `
     <button type="button" data-template-token="${escapeHtml(item.token)}" title="${escapeHtml([item.label, item.description].filter(Boolean).join(' · '))}">
@@ -505,42 +516,6 @@ function filteredProducts(query) {
     return productRows;
   }
   return productRows.filter((row) => productSearchText(row).includes(value));
-}
-
-function renderTemplateActionOptions() {
-  const current = templateActionSelect.value;
-  const groups = new Map();
-  deliveryTemplateActions.forEach((action) => {
-    const category = t(action.category || "Прочее");
-    if (!groups.has(category)) {
-      groups.set(category, []);
-    }
-    groups.get(category).push(action);
-  });
-  templateActionSelect.innerHTML = Array.from(groups.entries()).map(([category, actions]) => `
-    <optgroup label="${escapeHtml(category)}">
-      ${actions.map((action) => (
-        `<option value="${escapeHtml(action.key)}">${escapeHtml(t(action.label))}</option>`
-      )).join("")}
-    </optgroup>
-  `).join("");
-  if (deliveryTemplateActions.some((action) => action.key === current)) {
-    templateActionSelect.value = current;
-  }
-  syncTemplateEditor();
-}
-
-function selectedTemplateAction() {
-  return deliveryTemplateActions.find((action) => action.key === templateActionSelect.value);
-}
-
-function syncTemplateEditor() {
-  const action = selectedTemplateAction();
-  deliveryTemplate.value = action ? (action.template || action.default_template || "") : "";
-  deliveryTemplate.disabled = !action;
-  saveTemplateButton.disabled = !action;
-  defaultTemplateButton.disabled = !action;
-  clearTemplateButton.disabled = !action;
 }
 
 function selectedTemplateGroup() {
@@ -677,11 +652,19 @@ function hideLogin() {
   loginScreen.classList.add("hidden");
 }
 
-function logout() {
-  adminSessionToken = "";
-  localStorage.removeItem("reseller_admin_session");
-  localStorage.removeItem("reseller_admin_token");
-  showLogin();
+async function logout() {
+  try {
+    if (adminSessionToken) {
+      await api("/admin/api/logout", {method: "POST"});
+    }
+  } catch (_) {
+    // Local logout must still succeed if the server is unavailable.
+  } finally {
+    adminSessionToken = "";
+    localStorage.removeItem("reseller_admin_session");
+    localStorage.removeItem("reseller_admin_token");
+    location.reload();
+  }
 }
 
 function percentText(value) {
@@ -1217,7 +1200,7 @@ function setMappingEditMode(productId) {
 
 function editProductMapping(row) {
   setMappingEditMode(row.id);
-  productForm.elements.marketplace.value = row.marketplace;
+  productForm.elements.marketplace.value = row.marketplace === "digiseller" ? "plati" : row.marketplace;
   productForm.elements.external_product_id.value = row.external_product_id;
   productForm.elements.external_variant_id.value = row.external_variant_id || "";
   productForm.elements.action.value = row.action || "create";
@@ -1471,11 +1454,12 @@ function renderSettings(rows) {
         </label>
       `;
     }
-    const type = row.sensitive ? "password" : "text";
+    const type = row.kind === "number" ? "number" : (row.sensitive ? "password" : "text");
+    const step = row.kind === "number" ? ' step="any"' : "";
     const placeholder = row.sensitive && row.configured ? t("задано, оставьте пустым чтобы не менять", "set, leave empty to keep unchanged") : "";
     return `
       <label>${escapeHtml(row.label)} ${restart}
-        <input name="${escapeHtml(row.key)}" type="${type}" value="${escapeHtml(row.value)}" placeholder="${escapeHtml(placeholder)}">
+        <input name="${escapeHtml(row.key)}" type="${type}"${step} value="${escapeHtml(row.value)}" placeholder="${escapeHtml(placeholder)}">
       </label>
     `;
   }).join("") + `<button type="submit">${t("Сохранить настройки", "Save settings")}</button>`;
@@ -1561,7 +1545,7 @@ function renderSales(rows) {
       <td>${escapeHtml(row.created_at)}</td>
       <td>
         <div class="row-actions">
-          <button class="secondary" data-event-sale="${row.marketplace}:${row.external_order_id}" type="button">${t("История", "History")}</button>
+          <button class="secondary" data-event-sale="${escapeHtml(`${row.marketplace}:${row.external_order_id}`)}" type="button">${t("История", "History")}</button>
           <button class="secondary" data-sale-resend="${row.id}" type="button" ${row.xyranet_order_id ? "" : "disabled"}>${t("Повторить", "Resend")}</button>
         </div>
       </td>
@@ -1606,7 +1590,7 @@ function renderPendingOperations(rows) {
         <div class="row-actions">
           <button class="secondary" data-pending-complete="${row.id}" type="button">${t("Завершить", "Complete")}</button>
           <button class="secondary" data-pending-retry="${row.id}" type="button" ${row.status === "error" ? "" : "disabled"}>Retry</button>
-          <button class="secondary" data-pending-events="${row.marketplace}:${row.external_order_id}" type="button">${t("История", "History")}</button>
+          <button class="secondary" data-pending-events="${escapeHtml(`${row.marketplace}:${row.external_order_id}`)}" type="button">${t("История", "History")}</button>
         </div>
       </td>
     </tr>
@@ -1682,6 +1666,7 @@ async function loadAll() {
     showLogin();
     return;
   }
+  hideLogin();
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
     const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
@@ -1728,11 +1713,16 @@ async function loadAll() {
     renderOrderEvents(eventsConfig);
     hideLogin();
   } catch (error) {
-    adminSessionToken = "";
-    localStorage.removeItem("reseller_admin_session");
-    localStorage.removeItem("reseller_admin_token");
-    showLogin();
-    loginError.textContent = t("Сессия не активна или логин/пароль неверные.", "Session is inactive or login/password is incorrect.");
+    if (error?.status === 401 || error?.status === 403) {
+      adminSessionToken = "";
+      localStorage.removeItem("reseller_admin_session");
+      localStorage.removeItem("reseller_admin_token");
+      showLogin();
+      loginError.textContent = t("Сессия истекла. Войдите снова.", "The session has expired. Sign in again.");
+      return;
+    }
+    hideLogin();
+    alert(t("Не удалось загрузить данные панели: ", "Could not load panel data: ") + (error?.message || error));
   }
 }
 
@@ -1940,6 +1930,15 @@ variantDropdown.addEventListener("mousedown", (event) => {
   selectVariant(button.dataset.variant);
 });
 
+variantDropdown.addEventListener("keydown", (event) => {
+  const button = event.target.closest("[data-variant]");
+  if (!button || !["Enter", " "].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+  selectVariant(button.dataset.variant);
+});
+
 defaultTemplateButton.addEventListener("click", () => {
   const action = selectedTemplateAction();
   deliveryTemplate.value = action?.default_template || defaultDeliveryTemplate;
@@ -2130,6 +2129,15 @@ tariffDropdown.addEventListener("mousedown", (event) => {
   selectTariff(button.dataset.code);
 });
 
+tariffDropdown.addEventListener("keydown", (event) => {
+  const button = event.target.closest("[data-code]");
+  if (!button || !["Enter", " "].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+  selectTariff(button.dataset.code);
+});
+
 document.addEventListener("mousedown", (event) => {
   if (!event.target.closest(".tariff-field")) {
     tariffDropdown.classList.add("hidden");
@@ -2162,6 +2170,7 @@ settingsForm.addEventListener("change", async (event) => {
 
 settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = settingsForm.querySelector('button[type="submit"]');
   const settings = {};
   for (const field of settingsForm.elements) {
     if (!field.name) {
@@ -2176,12 +2185,23 @@ settingsForm.addEventListener("submit", async (event) => {
     }
     settings[field.name] = field.value;
   }
-  await api("/admin/api/settings", {
-    method: "PATCH",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({settings}),
-  });
-  await loadAll();
+  if (submitButton) {
+    submitButton.disabled = true;
+  }
+  try {
+    await api("/admin/api/settings", {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({settings}),
+    });
+    await loadAll();
+  } catch (error) {
+    alert(`${t("Не удалось сохранить настройки", "Could not save settings")}: ${error.message || error}`);
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+    }
+  }
 });
 
 restartTelegramButton.addEventListener("click", async () => {

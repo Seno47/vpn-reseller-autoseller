@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from reseller_autoseller.config import Settings
 from reseller_autoseller.db import Database
 from reseller_autoseller.xyra_client import XyraNetClient
+
+
+DEFAULT_ADMIN_SECRET_VALUES = {
+    "",
+    "admin",
+    "change-me",
+    "changeme",
+    "password",
+    "replace-me",
+    "replace-with-random-long-token",
+    "replace-with-strong-password",
+}
+MIN_ADMIN_PASSWORD_LENGTH = 8
+MAX_ADMIN_PASSWORD_LENGTH = 200
+MAX_ADMIN_USERNAME_LENGTH = 100
 
 
 @dataclass(frozen=True)
@@ -227,15 +243,38 @@ class RuntimeConfig:
         return result
 
     def set_value(self, key: str, value: Any) -> None:
+        stored = self._normalize_value(key, value)
+        if stored is not None:
+            self.db.set_setting(key, stored)
+
+    def set_many(self, values: dict[str, Any]) -> None:
+        normalized: dict[str, str] = {}
+        for key, value in values.items():
+            stored = self._normalize_value(key, value)
+            if stored is not None:
+                normalized[key] = stored
+        self.db.set_settings(normalized)
+
+    def _normalize_value(self, key: str, value: Any) -> str | None:
         if key not in SETTING_BY_KEY:
             raise ValueError(f"Unknown setting: {key}")
         definition = SETTING_BY_KEY[key]
         if definition.sensitive and str(value).strip() == "":
-            return
+            return None
         if definition.kind == "boolean":
             stored = "true" if self._as_bool(value) else "false"
         elif definition.kind == "number":
-            stored = str(float(value))
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid numeric value for {key}: {value}") from exc
+            if not math.isfinite(number):
+                raise ValueError(f"Invalid numeric value for {key}: {value}")
+            if key == "xyranet_timeout_seconds" and not 0 < number <= 300:
+                raise ValueError("API timeout must be greater than zero and no more than 300 seconds")
+            if key == "digiseller_unique_code_request_delay_minutes" and not 0 <= number <= 24 * 60:
+                raise ValueError("Unique code request delay must be between 0 and 1440 minutes")
+            stored = str(number)
         elif definition.kind == "select":
             stored = str(value).strip().lower()
             allowed = {option.value for option in definition.options}
@@ -243,13 +282,19 @@ class RuntimeConfig:
                 raise ValueError(f"Unsupported value for {key}: {value}")
         else:
             stored = str(value).strip()
+        if key == "admin_username":
+            if not stored:
+                raise ValueError("Admin username cannot be empty")
+            if len(stored) > MAX_ADMIN_USERNAME_LENGTH:
+                raise ValueError(f"Admin username cannot exceed {MAX_ADMIN_USERNAME_LENGTH} characters")
+        if key == "admin_password":
+            if stored.lower() in DEFAULT_ADMIN_SECRET_VALUES or len(stored) < MIN_ADMIN_PASSWORD_LENGTH:
+                raise ValueError(f"Admin password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters and not a default value")
+            if len(stored) > MAX_ADMIN_PASSWORD_LENGTH:
+                raise ValueError(f"Admin password cannot exceed {MAX_ADMIN_PASSWORD_LENGTH} characters")
         if key == "xyranet_api_base_url":
             stored = XyraNetClient.normalize_base_url(stored)
-        self.db.set_setting(key, stored)
-
-    def set_many(self, values: dict[str, Any]) -> None:
-        for key, value in values.items():
-            self.set_value(key, value)
+        return stored
 
     @staticmethod
     def _as_bool(value: Any) -> bool:

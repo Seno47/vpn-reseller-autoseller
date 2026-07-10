@@ -16,6 +16,36 @@ SUPPORTED_LOT_HOSTS = (
     "digiseller.com",
 )
 
+MARKETPLACE_LOT_HOSTS = {
+    "plati": ("plati.io", "plati.market", "digiseller.com"),
+    "ggsel": ("ggsel.net", "ggsel.com"),
+}
+
+PRODUCT_ID_KEYS = {
+    "id_goods",
+    "goods_id",
+    "product_id",
+    "id_d",
+    "idd",
+    "lot_id",
+    "item_id",
+}
+
+STRUCTURED_PRODUCT_ID_RE = re.compile(
+    r"""
+    (?<![A-Za-z0-9_-])(?:data-)?["']?
+    (?:id[-_]goods|goods[-_]id|product[-_]id|id[-_]d|idd|lot[-_]id|item[-_]id)
+    ["']?\s*[:=]\s*["']?
+    ([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+VARIANT_SELECT_HINT_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:options?|variants?|variations?|modifications?)(?:$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+
 
 class LotOptionParser(HTMLParser):
     def __init__(self, product_id: str = "") -> None:
@@ -25,14 +55,18 @@ class LotOptionParser(HTMLParser):
         self._label_for = ""
         self._label_depth = 0
         self._label_parts: list[str] = []
+        self._variant_select_stack: list[bool] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         data = {key.lower(): value or "" for key, value in attrs}
-        if tag.lower() == "input":
+        tag_name = tag.lower()
+        if tag_name == "select":
+            self._variant_select_stack.append(self._is_variant_select(data))
+        if tag_name == "input":
             self._collect_input(data)
-        if tag.lower() == "option":
+        if tag_name == "option" and self._variant_select_stack and self._variant_select_stack[-1]:
             self._collect_select_option(data)
-        if tag.lower() == "label" and data.get("for") in self.options:
+        if tag_name == "label" and data.get("for") in self.options:
             self._label_for = data["for"]
             self._label_depth = 1
             self._label_parts = []
@@ -41,6 +75,8 @@ class LotOptionParser(HTMLParser):
             self._label_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "select" and self._variant_select_stack:
+            self._variant_select_stack.pop()
         if not self._label_for:
             return
         self._label_depth -= 1
@@ -91,17 +127,40 @@ class LotOptionParser(HTMLParser):
         option_key = f"select-{len(self.options)}-{value}"
         self.options[option_key] = {"id": value, "label": value, "selected": "selected" in data}
 
+    @staticmethod
+    def _is_variant_select(data: dict[str, str]) -> bool:
+        marker_values = [
+            data.get("id", ""),
+            data.get("name", ""),
+            data.get("class", ""),
+            data.get("data-role", ""),
+            data.get("data-type", ""),
+            data.get("data-name", ""),
+        ]
+        if any(value.strip().lower() in {"id_o", "id-o", "id_v", "id-v"} for value in marker_values):
+            return True
+        markers = " ".join(re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value) for value in marker_values)
+        return VARIANT_SELECT_HINT_RE.search(markers) is not None
+
 
 def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(value or "")).strip()
 
 
 def detect_marketplace(source: str) -> str:
-    text = source.lower()
+    text = source.strip()
+    parsed = urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if host:
+        for marketplace, allowed_hosts in MARKETPLACE_LOT_HOSTS.items():
+            if any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+                return marketplace
+        return ""
+    text = text.lower()
     if "ggsel" in text:
         return "ggsel"
     if "digiseller" in text:
-        return "digiseller"
+        return "plati"
     if "plati" in text:
         return "plati"
     return ""
@@ -116,23 +175,30 @@ def extract_product_id(source: str) -> str:
     except json.JSONDecodeError:
         data = None
     if isinstance(data, dict):
-        value = pick_nested(data, {"id_goods", "goods_id", "product_id", "id_d", "idd", "lot_id", "item_id"})
+        value = pick_nested(data, PRODUCT_ID_KEYS)
         if value:
             return value
     parsed = urlparse(text)
-    if parsed.query:
-        query = dict(parse_qsl(parsed.query, keep_blank_values=False))
-        for key in ("id_goods", "goods_id", "product_id", "id_d", "idd", "lot_id", "item_id"):
+    is_url = parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
+    query_text = parsed.query if is_url else text.lstrip("?") if "=" in text and "<" not in text else ""
+    if query_text:
+        query = {key.lower(): value for key, value in parse_qsl(query_text, keep_blank_values=False)}
+        for key in PRODUCT_ID_KEYS:
             if query.get(key):
                 return query[key]
-    numbers = re.findall(r"\d{4,}", parsed.path or text)
-    return numbers[-1] if numbers else ""
+    marker = STRUCTURED_PRODUCT_ID_RE.search(text)
+    if marker:
+        return marker.group(1)
+    if is_url:
+        numbers = re.findall(r"\d{4,}", parsed.path)
+        return numbers[-1] if numbers else ""
+    return ""
 
 
 def pick_nested(value: Any, keys: set[str]) -> str:
     if isinstance(value, dict):
         for key, item in value.items():
-            if key.lower() in keys and str(item).strip():
+            if key.lower() in keys and not isinstance(item, (dict, list)) and str(item).strip():
                 return str(item).strip()
             found = pick_nested(item, keys)
             if found:

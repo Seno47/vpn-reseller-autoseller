@@ -44,7 +44,7 @@ def _pick(payload: dict[str, Any], *keys: str) -> str | None:
 
 def normalize_marketplace(value: str) -> str:
     marketplace = value.strip().lower()
-    if marketplace == "plati_market":
+    if marketplace in {"plati_market", "digiseller"}:
         marketplace = "plati"
     if marketplace not in SUPPORTED_MARKETPLACES:
         raise ValueError(f"Unsupported marketplace: {value}")

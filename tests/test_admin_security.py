@@ -1,6 +1,7 @@
 import hashlib
 import os
 import unittest
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -8,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from reseller_autoseller.app import create_app
 from reseller_autoseller.config import get_settings
+from reseller_autoseller.db import Database
+from reseller_autoseller.marketplaces import SaleEvent
 
 
 class AdminSecurityTests(unittest.TestCase):
@@ -57,6 +60,22 @@ class AdminSecurityTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertGreater(len(response.json()["token"]), 24)
 
+    def test_admin_responses_set_security_and_no_store_headers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+
+            page = client.get("/")
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+
+            self.assertEqual(page.headers["x-frame-options"], "DENY")
+            self.assertEqual(page.headers["x-content-type-options"], "nosniff")
+            self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
+            self.assertEqual(page.headers["cache-control"], "no-store")
+            self.assertEqual(login.headers["cache-control"], "no-store")
+
     def test_password_change_invalidates_active_sessions(self) -> None:
         with TemporaryDirectory() as tmp:
             client = self.make_client(tmp)
@@ -88,6 +107,88 @@ class AdminSecurityTests(unittest.TestCase):
                 json={"username": "admin", "password": "new-strong-password"},
             )
             self.assertEqual(new_password.status_code, 200)
+
+    def test_logout_revokes_admin_session(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            logout = client.post("/admin/api/logout", headers=headers)
+            after_logout = client.get("/admin/api/status", headers=headers)
+
+            self.assertEqual(logout.status_code, 204)
+            self.assertEqual(after_logout.status_code, 401)
+
+    def test_settings_reject_credentials_that_would_lock_out_admin(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            empty_username = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"admin_username": ""}},
+            )
+            weak_password = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"admin_password": "short"}},
+            )
+
+            self.assertEqual(empty_username.status_code, 400)
+            self.assertEqual(weak_password.status_code, 400)
+            self.assertEqual(client.get("/admin/api/status", headers=headers).status_code, 200)
+
+    def test_settings_validation_is_atomic(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            response = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"panel_language": "en", "unknown_setting": "value"}},
+            )
+
+            self.assertEqual(response.status_code, 400)
+            settings = client.get("/admin/api/settings", headers=headers).json()
+            language = next(item for item in settings if item["key"] == "panel_language")
+            self.assertEqual(language["value"], "ru")
+
+    def test_settings_reject_invalid_timeouts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            zero = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"xyranet_timeout_seconds": 0}},
+            )
+            not_finite = client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={"settings": {"xyranet_timeout_seconds": "NaN"}},
+            )
+
+            self.assertEqual(zero.status_code, 400)
+            self.assertEqual(not_finite.status_code, 400)
 
     def test_restart_invalidates_active_sessions(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -271,6 +372,88 @@ class AdminSecurityTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["action"], "unique_code_request_scheduled")
+
+    def test_digiseller_product_alias_is_saved_as_canonical_plati(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+            response = client.post(
+                "/admin/api/products",
+                headers=headers,
+                json={
+                    "marketplace": "digiseller",
+                    "external_product_id": "5968452",
+                    "external_variant_id": "",
+                    "action": "create",
+                    "action_params": {},
+                    "tariff_code": "lite_monthly",
+                    "title": "Legacy alias",
+                    "enabled": True,
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["marketplace"], "plati")
+
+    def test_delete_referenced_product_returns_conflict(self) -> None:
+        with TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+            product_response = client.post(
+                "/admin/api/products",
+                headers=headers,
+                json={
+                    "marketplace": "plati",
+                    "external_product_id": "5968452",
+                    "external_variant_id": "23468281",
+                    "action": "create",
+                    "action_params": {},
+                    "tariff_code": "lite_monthly",
+                    "title": "Lite",
+                    "enabled": True,
+                },
+            )
+            product = product_response.json()
+            db = Database(Path(tmp) / "test.sqlite3")
+            sale = db.create_sale(
+                SaleEvent(
+                    marketplace="plati",
+                    external_order_id="12345",
+                    external_product_id="5968452",
+                    external_variant_id="23468281",
+                    buyer_email=None,
+                    buyer_name=None,
+                    amount=None,
+                    currency=None,
+                    raw_payload={"inv": "12345"},
+                )
+            )
+            db.create_delivery(
+                sale["id"],
+                product["id"],
+                {
+                    "xyranet_order_id": "xyra-1",
+                    "subscription_url": "https://x.example/1",
+                    "panel_username": "user1",
+                    "tariff_code": "lite_monthly",
+                    "delivery_text": "first",
+                    "raw_response": {"ok": 1},
+                },
+            )
+
+            response = client.delete(f"/admin/api/products/{product['id']}", headers=headers)
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIsNotNone(db.get_product(product["id"]))
 
 
 if __name__ == "__main__":

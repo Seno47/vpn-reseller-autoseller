@@ -138,63 +138,308 @@ prepare_system_packages() {
   install_python_runtime
 }
 
+dotenv_quote() {
+  local name="$1"
+  local value="$2"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "${name} cannot contain a line break." >&2
+    return 1
+  fi
+  if [[ "$value" == *'${'* ]]; then
+    echo "${name} cannot contain a \${...} sequence." >&2
+    return 1
+  fi
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
 write_env() {
   local env_file="$1"
-  umask 077
-  cat > "$env_file" <<EOF_ENV
+  local app_base_url_value xyranet_api_key_value digiseller_seller_id_value
+  local digiseller_api_key_value ggsel_seller_id_value ggsel_api_key_value
+  local telegram_bot_token_value admin_ids_value admin_username_value admin_password_value
+  local panel_language_value repo_url_value branch_value
+
+  app_base_url_value="$(dotenv_quote "APP_BASE_URL" "$APP_BASE_URL")"
+  xyranet_api_key_value="$(dotenv_quote "XYRANET_API_KEY" "$XYRANET_API_KEY")"
+  digiseller_seller_id_value="$(dotenv_quote "DIGISELLER_SELLER_ID" "$DIGISELLER_SELLER_ID")"
+  digiseller_api_key_value="$(dotenv_quote "DIGISELLER_API_KEY" "$DIGISELLER_API_KEY")"
+  ggsel_seller_id_value="$(dotenv_quote "GGSEL_SELLER_ID" "$GGSEL_SELLER_ID")"
+  ggsel_api_key_value="$(dotenv_quote "GGSEL_API_KEY" "$GGSEL_API_KEY")"
+  telegram_bot_token_value="$(dotenv_quote "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN")"
+  admin_ids_value="$(dotenv_quote "ADMIN_IDS" "$ADMIN_IDS")"
+  admin_username_value="$(dotenv_quote "ADMIN_USERNAME" "$ADMIN_USERNAME")"
+  admin_password_value="$(dotenv_quote "ADMIN_PASSWORD" "$ADMIN_PASSWORD")"
+  panel_language_value="$(dotenv_quote "PANEL_LANGUAGE" "$PANEL_LANGUAGE")"
+  repo_url_value="$(dotenv_quote "APP_UPDATE_REPO_URL" "$APP_REPO_URL")"
+  branch_value="$(dotenv_quote "APP_UPDATE_BRANCH" "$APP_BRANCH")"
+
+  (
+    umask 077
+    cat > "$env_file" <<EOF_ENV
 APP_HOST=127.0.0.1
 APP_PORT=${APP_PORT}
-APP_BASE_URL=${APP_BASE_URL}
+APP_BASE_URL=${app_base_url_value}
 
 XYRANET_API_BASE_URL=https://xyranet.pro/api/wholesale
-XYRANET_API_KEY=${XYRANET_API_KEY}
+XYRANET_API_KEY=${xyranet_api_key_value}
 XYRANET_TIMEOUT_SECONDS=30
 
-DIGISELLER_SELLER_ID=${DIGISELLER_SELLER_ID}
-DIGISELLER_API_KEY=${DIGISELLER_API_KEY}
-GGSEL_SELLER_ID=${GGSEL_SELLER_ID}
-GGSEL_API_KEY=${GGSEL_API_KEY}
+DIGISELLER_SELLER_ID=${digiseller_seller_id_value}
+DIGISELLER_API_KEY=${digiseller_api_key_value}
+GGSEL_SELLER_ID=${ggsel_seller_id_value}
+GGSEL_API_KEY=${ggsel_api_key_value}
 
-TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-ADMIN_IDS=${ADMIN_IDS}
-ADMIN_USERNAME=${ADMIN_USERNAME}
-ADMIN_PASSWORD=${ADMIN_PASSWORD}
+TELEGRAM_BOT_TOKEN=${telegram_bot_token_value}
+ADMIN_IDS=${admin_ids_value}
+ADMIN_USERNAME=${admin_username_value}
+ADMIN_PASSWORD=${admin_password_value}
 
 DATABASE_PATH=data/reseller.sqlite3
-PANEL_LANGUAGE=${PANEL_LANGUAGE}
+PANEL_LANGUAGE=${panel_language_value}
 ENABLE_TELEGRAM=true
-APP_UPDATE_REPO_URL=${APP_REPO_URL}
-APP_UPDATE_BRANCH=${APP_BRANCH}
+APP_UPDATE_REPO_URL=${repo_url_value}
+APP_UPDATE_BRANCH=${branch_value}
 APP_UPDATE_CHECK_INTERVAL_HOURS=12
 APP_UPDATE_TRIGGER_FILE=data/update-request.json
-APP_UPDATE_STATUS_FILE=data/update-status.json
+APP_UPDATE_STATUS_FILE=/run/${APP_NAME}/update-status.json
 LOG_LEVEL=INFO
 EOF_ENV
+  )
+}
+
+sync_source_tree() {
+  local source_dir="$1"
+  local source_real app_real
+  claim_install_target_boundary
+  reject_unsafe_preserved_paths
+  source_real="$(realpath "$source_dir")"
+  app_real="$(realpath "$APP_DIR")"
+  if [ "$source_real" = "$app_real" ]; then
+    return
+  fi
+  rsync -a --delete \
+    --exclude ".git" \
+    --exclude ".venv" \
+    --exclude ".env" \
+    --exclude ".pytest_cache" \
+    --exclude "__pycache__" \
+    --exclude "backups" \
+    --exclude "data" \
+    --exclude "output" \
+    --exclude "*.log" \
+    "$source_dir/" "$APP_DIR/"
 }
 
 install_source() {
   local repo_url="${APP_REPO_URL:-}"
-  if [ -f "run.py" ] && [ -d "reseller_autoseller" ]; then
-    mkdir -p "$APP_DIR"
-    rsync -a --delete \
-      --exclude ".venv" \
-      --exclude ".env" \
-      --exclude "data/*.sqlite3-wal" \
-      --exclude "data/*.sqlite3-shm" \
-      ./ "$APP_DIR/"
-    return
-  fi
-
+  local temporary_dir=""
+  validate_install_target
   if [ -z "$repo_url" ]; then
     repo_url="$(ask "GitHub repository URL")"
     APP_REPO_URL="$repo_url"
   fi
-  if [ -d "$APP_DIR/.git" ]; then
-    git -C "$APP_DIR" pull --ff-only
-  else
-    rm -rf "$APP_DIR"
-    git clone "$repo_url" "$APP_DIR"
+  temporary_dir="$(mktemp -d)"
+  if ! git clone --depth 1 --branch "$APP_BRANCH" -- "$repo_url" "$temporary_dir/source"; then
+    rm -rf -- "$temporary_dir"
+    return 1
   fi
+  if ! sync_source_tree "$temporary_dir/source"; then
+    rm -rf -- "$temporary_dir"
+    return 1
+  fi
+  rm -rf -- "$temporary_dir"
+}
+
+validate_app_dir_path() {
+  local app_real relative existing_parent parent_uid parent_mode next_parent
+  if [ -L "$APP_DIR" ]; then
+    echo "Refusing symlinked application directory: ${APP_DIR}" >&2
+    return 1
+  fi
+  app_real="$(realpath -m -- "$APP_DIR")" || return 1
+  relative="${app_real#/}"
+  case "$app_real" in
+    /var/lib/*)
+      ;;
+    /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/tmp|/tmp/*|/usr|/usr/*|/var|/var/*)
+      echo "Refusing unsafe application root: ${app_real}" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$relative" != */* ]]; then
+    echo "Application directory is too shallow: ${app_real}" >&2
+    return 1
+  fi
+  existing_parent="$(dirname -- "$app_real")"
+  while [ ! -e "$existing_parent" ]; do
+    next_parent="$(dirname -- "$existing_parent")"
+    if [ "$next_parent" = "$existing_parent" ]; then
+      echo "Cannot find a safe parent for ${app_real}" >&2
+      return 1
+    fi
+    existing_parent="$next_parent"
+  done
+  if [ ! -d "$existing_parent" ]; then
+    echo "Application parent is not a directory: ${existing_parent}" >&2
+    return 1
+  fi
+  parent_uid="$(stat -c '%u' -- "$existing_parent")" || return 1
+  parent_mode="$(stat -c '%A' -- "$existing_parent")" || return 1
+  if [ "$parent_uid" != "0" ] || [ "${parent_mode:5:1}" = "w" ] || [ "${parent_mode:8:1}" = "w" ]; then
+    echo "Application parent must be root-owned and not group/other-writable: ${existing_parent}" >&2
+    return 1
+  fi
+}
+
+validate_install_target() {
+  validate_app_dir_path || return 1
+  if [ ! -e "$APP_DIR" ]; then
+    return 0
+  fi
+  if [ ! -d "$APP_DIR" ]; then
+    echo "Application target is not a directory: ${APP_DIR}" >&2
+    return 1
+  fi
+  if [ -f "$APP_DIR/run.py" ] && [ ! -L "$APP_DIR/run.py" ] &&
+     [ -f "$APP_DIR/requirements.txt" ] && [ ! -L "$APP_DIR/requirements.txt" ] &&
+     [ -d "$APP_DIR/reseller_autoseller" ] && [ ! -L "$APP_DIR/reseller_autoseller" ]; then
+    return 0
+  fi
+  if [ -z "$(find "$APP_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    return 0
+  fi
+  echo "Refusing to replace a non-empty directory without application markers: ${APP_DIR}" >&2
+  return 1
+}
+
+claim_install_target_boundary() {
+  validate_install_target || return 1
+  mkdir -p "$APP_DIR"
+  chown -h root:root "$APP_DIR"
+  chmod 0755 "$APP_DIR"
+  validate_install_target
+}
+
+reject_unsafe_preserved_paths() {
+  local child
+  for child in data .env .venv backups .git; do
+    if [ -L "$APP_DIR/$child" ]; then
+      echo "Refusing symlinked preserved path: ${APP_DIR}/${child}" >&2
+      return 1
+    fi
+  done
+}
+
+remove_legacy_git_metadata() {
+  reject_unsafe_preserved_paths || return 1
+  rm -rf -- "$APP_DIR/.git"
+}
+
+install_runtime_artifacts() {
+  local venv_new env_new old_venv old_env had_old_venv=0 had_old_env=0
+  reject_unsafe_preserved_paths || return 1
+  venv_new="$(mktemp -d "$APP_DIR/.venv-new.XXXXXX")"
+  env_new="$(mktemp "$APP_DIR/.env-new.XXXXXX")"
+  if ! "$PYTHON_BIN" -m venv --clear "$venv_new" ||
+     ! "$venv_new/bin/python" -m pip install --upgrade pip ||
+     ! "$venv_new/bin/python" -m pip install -r "$APP_DIR/requirements.txt" ||
+     ! write_env "$env_new"; then
+    rm -rf -- "$venv_new"
+    rm -f -- "$env_new"
+    return 1
+  fi
+
+  old_venv="$APP_DIR/.venv-old-$$"
+  old_env="$APP_DIR/.env-old-$$"
+  if [ -e "$old_venv" ] || [ -L "$old_venv" ] || [ -e "$old_env" ] || [ -L "$old_env" ]; then
+    echo "Refusing existing runtime rollback paths in ${APP_DIR}" >&2
+    rm -rf -- "$venv_new"
+    rm -f -- "$env_new"
+    return 1
+  fi
+
+  trap '' INT TERM
+  if [ -e "$APP_DIR/.venv" ]; then
+    if ! mv -T -- "$APP_DIR/.venv" "$old_venv"; then
+      trap - INT TERM
+      rm -rf -- "$venv_new"
+      rm -f -- "$env_new"
+      return 1
+    fi
+    had_old_venv=1
+  fi
+  if [ -e "$APP_DIR/.env" ]; then
+    if ! mv -T -- "$APP_DIR/.env" "$old_env"; then
+      [ "$had_old_venv" = "1" ] && mv -T -- "$old_venv" "$APP_DIR/.venv"
+      trap - INT TERM
+      rm -rf -- "$venv_new"
+      rm -f -- "$env_new"
+      return 1
+    fi
+    had_old_env=1
+  fi
+  if ! mv -T -- "$venv_new" "$APP_DIR/.venv"; then
+    [ "$had_old_venv" = "1" ] && mv -T -- "$old_venv" "$APP_DIR/.venv"
+    [ "$had_old_env" = "1" ] && mv -T -- "$old_env" "$APP_DIR/.env"
+    trap - INT TERM
+    rm -rf -- "$venv_new"
+    rm -f -- "$env_new"
+    return 1
+  fi
+  if ! mv -T -- "$env_new" "$APP_DIR/.env"; then
+    rm -rf -- "$APP_DIR/.venv"
+    [ "$had_old_venv" = "1" ] && mv -T -- "$old_venv" "$APP_DIR/.venv"
+    [ "$had_old_env" = "1" ] && mv -T -- "$old_env" "$APP_DIR/.env"
+    trap - INT TERM
+    rm -f -- "$env_new"
+    return 1
+  fi
+  trap - INT TERM
+  [ "$had_old_venv" = "1" ] && rm -rf -- "$old_venv"
+  [ "$had_old_env" = "1" ] && rm -f -- "$old_env"
+  return 0
+}
+
+secure_app_permissions() {
+  local app_real
+  validate_app_dir_path || exit 1
+  if [ -L "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then
+    echo "Refusing unsafe application directory: ${APP_DIR}" >&2
+    exit 1
+  fi
+  app_real="$(realpath -e -- "$APP_DIR")" || exit 1
+  if ! { [ -f "$APP_DIR/run.py" ] && [ ! -L "$APP_DIR/run.py" ] &&
+         [ -f "$APP_DIR/requirements.txt" ] && [ ! -L "$APP_DIR/requirements.txt" ] &&
+         [ -d "$APP_DIR/reseller_autoseller" ] && [ ! -L "$APP_DIR/reseller_autoseller" ]; }; then
+    echo "Application markers are missing in ${app_real}" >&2
+    exit 1
+  fi
+  if [ -L "$APP_DIR/data" ]; then
+    echo "Refusing symlinked data directory: ${APP_DIR}/data" >&2
+    exit 1
+  fi
+  if [ -L "$APP_DIR/.env" ]; then
+    echo "Refusing symlinked environment file: ${APP_DIR}/.env" >&2
+    exit 1
+  fi
+
+  mkdir -p "$APP_DIR/data" "$APP_DIR/backups"
+  find "$APP_DIR" -xdev -path "$APP_DIR/data" -prune -o -exec chown -h root:root {} +
+  find "$APP_DIR" \
+    -xdev \
+    -path "$APP_DIR/data" -prune -o \
+    -path "$APP_DIR/backups" -prune -o \
+    -path "$APP_DIR/.env" -prune -o \
+    ! -type l -exec chmod u+rwX,go+rX,go-w {} +
+  chmod 0700 "$APP_DIR/backups"
+  find "$APP_DIR/backups" -xdev -type d -exec chmod 0700 {} +
+  find "$APP_DIR/backups" -xdev -type f -exec chmod 0600 {} +
+  chown -hR "$APP_USER:$APP_USER" "$APP_DIR/data"
+  chmod 0750 "$APP_DIR/data"
+  chown "root:$APP_USER" "$APP_DIR/.env"
+  chmod 0640 "$APP_DIR/.env"
 }
 
 install_update_service() {
@@ -206,6 +451,12 @@ Description=XyraNet reseller autoseller updater
 
 [Service]
 Type=oneshot
+User=root
+Group=root
+UMask=0022
+RuntimeDirectory=${APP_NAME}
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 Environment=APP_NAME=${APP_NAME}
 Environment=APP_DIR=${APP_DIR}
 Environment=APP_USER=${APP_USER}
@@ -213,7 +464,9 @@ Environment=APP_REPO_URL=${APP_REPO_URL}
 Environment=APP_BRANCH=${APP_BRANCH}
 Environment=APP_SERVICE_NAME=${APP_NAME}.service
 Environment=APP_REQUEST_FILE=${APP_DIR}/data/update-request.json
-Environment=APP_STATUS_FILE=${APP_DIR}/data/update-status.json
+Environment=APP_STATUS_FILE=/run/${APP_NAME}/update-status.json
+Environment=APP_UPDATER_PATH=${updater}
+Environment=APP_PYTHON_BIN=${PYTHON_BIN}
 ExecStart=${updater}
 EOF_SERVICE
 
@@ -244,6 +497,7 @@ Wants=network-online.target
 Type=simple
 User=${APP_USER}
 Group=${APP_USER}
+UMask=0077
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
 ExecStart=${APP_DIR}/.venv/bin/python run.py
@@ -282,6 +536,9 @@ EOF_NGINX
 }
 
 need_root
+validate_install_target
+claim_install_target_boundary
+reject_unsafe_preserved_paths
 
 echo "== XyraNet Reseller Autoseller Linux installer =="
 echo "The app itself will bind to 127.0.0.1:${APP_PORT}; it will not expose HTTP directly."
@@ -327,13 +584,11 @@ fi
 
 install_source
 cd "$APP_DIR"
-"$PYTHON_BIN" -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+claim_install_target_boundary
+remove_legacy_git_metadata
 mkdir -p data
-write_env "$APP_DIR/.env"
-chown -R "$APP_USER:$APP_USER" "$APP_DIR"
-chmod 600 "$APP_DIR/.env"
+install_runtime_artifacts
+secure_app_permissions
 
 install_systemd
 install_update_service

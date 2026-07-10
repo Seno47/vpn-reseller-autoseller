@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -39,10 +40,15 @@ from reseller_autoseller.digiseller_client import (
     unique_code_state,
 )
 from reseller_autoseller.lot_parser import extract_product_id, is_allowed_lot_url, parse_lot_html
-from reseller_autoseller.marketplaces import SUPPORTED_MARKETPLACES, normalize_sale
+from reseller_autoseller.marketplaces import normalize_marketplace, normalize_sale
 from reseller_autoseller.marketplace_chat import MarketplaceMessenger, RuntimeGgselClient
 from reseller_autoseller.notifications import TelegramNotifier, compact_text, sale_title
-from reseller_autoseller.runtime_config import RuntimeConfig, RuntimeXyraNetClient
+from reseller_autoseller.runtime_config import (
+    DEFAULT_ADMIN_SECRET_VALUES,
+    MIN_ADMIN_PASSWORD_LENGTH,
+    RuntimeConfig,
+    RuntimeXyraNetClient,
+)
 from reseller_autoseller.services import (
     ACTION_LABELS,
     BASE_ACTION_LABELS,
@@ -51,7 +57,9 @@ from reseller_autoseller.services import (
     DEFAULT_DELIVERY_TEMPLATE,
     DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS,
     DELIVERY_TEMPLATE_VARIABLES,
+    DeliveryInProgressError,
     DeliveryService,
+    MarketplaceMessageError,
     TEMPLATE_CATEGORIES,
     TEMPLATE_GROUPS,
     TEMPLATE_KEYS,
@@ -69,20 +77,10 @@ from reseller_autoseller.xyra_client import XyraNetApiError
 log = logging.getLogger(__name__)
 UNIQUE_CODE_RE = re.compile(r"\b[A-Za-z0-9]{16}\b")
 LOOSE_UNIQUE_CODE_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9\s-]{14,36}[A-Za-z0-9]\b")
-DEFAULT_ADMIN_SECRET_VALUES = {
-    "",
-    "admin",
-    "change-me",
-    "changeme",
-    "password",
-    "replace-me",
-    "replace-with-random-long-token",
-    "replace-with-strong-password",
-}
-MIN_ADMIN_PASSWORD_LENGTH = 8
 ADMIN_SESSION_TTL_SECONDS = 24 * 60 * 60
 LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
+LOGIN_RATE_LIMIT_MAX_KEYS = 10000
 DIGISELLER_NAIVE_DATETIME_ZONE = timezone(timedelta(hours=3), "MSK")
 
 
@@ -290,13 +288,14 @@ def create_app() -> FastAPI:
         )
 
     async def daily_statistics_loop() -> None:
-        last_sent = ""
+        last_sent = db.get_setting("_daily_statistics_last_sent") or ""
         while True:
             try:
                 today = date.today().isoformat()
                 if runtime.get_bool("notify_daily_statistics") and last_sent != today:
                     notify_admins(daily_statistics_text(), kind="daily_statistics")
                     last_sent = today
+                    db.set_setting("_daily_statistics_last_sent", today)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -419,13 +418,14 @@ def create_app() -> FastAPI:
         selected = str(product_id or "").strip()
         if not selected:
             return []
-        return [
+        products = [
             product
             for product in db.list_products()
-            if str(product.get("marketplace") or "") == "plati"
+            if str(product.get("marketplace") or "") in {"plati", "digiseller"}
             and str(product.get("external_product_id") or "") == selected
             and int(product.get("enabled", 0))
         ]
+        return sorted(products, key=lambda product: str(product.get("marketplace") or "") != "plati")
 
     def sale_notification_signature_ok(payload: dict[str, Any], invoice_id: str, product_id: str) -> bool:
         if not runtime.get_bool("digiseller_validate_sale_sha256"):
@@ -467,6 +467,12 @@ def create_app() -> FastAPI:
             "purchase_id",
             "purchaseId",
             "id",
+        )
+
+    def ggsel_order_error_is_permanent(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return bool(re.search(r"\b(?:400|404|410)\b", text)) or any(
+            marker in text for marker in ("not found", "не найден", "invalid order", "unknown order")
         )
 
     def merge_sale_payload(summary: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
@@ -595,7 +601,7 @@ def create_app() -> FastAPI:
         result: list[int] = []
         seen: set[int] = set()
         for product in db.list_products():
-            if str(product.get("marketplace") or "") != "plati" or not int(product.get("enabled", 0)):
+            if str(product.get("marketplace") or "") not in {"plati", "digiseller"} or not int(product.get("enabled", 0)):
                 continue
             try:
                 product_id = int(str(product.get("external_product_id") or "").strip())
@@ -690,6 +696,7 @@ def create_app() -> FastAPI:
             "request_unique_code",
             unique_code_request_context(invoice_id, purchase, product),
         )
+
         if await messenger.send_message("plati", invoice_id, text):
             db.add_order_event(
                 marketplace="plati",
@@ -754,6 +761,61 @@ def create_app() -> FastAPI:
                 event_id=int(event.get("id") or 0),
             )
 
+    async def mark_unique_code_delivery(
+        *,
+        invoice_id: str,
+        code: str,
+        purchase: dict[str, Any],
+        event_external_order_id: str,
+        sale_id: int | None,
+        pending_operation_id: int | None = None,
+    ) -> bool:
+        events = db.list_order_events(
+            marketplace="plati",
+            external_order_id=event_external_order_id,
+            limit=100,
+        )
+        if any(
+            str(item.get("event_type") or "") == "unique_code_marked_delivered"
+            and event_payload(item).get("unique_code") == code
+            for item in events
+        ):
+            return True
+        try:
+            # States 2/3/4 already mean Digiseller has a delivery record. This
+            # also closes the crash window after a successful API call but
+            # before our local success event was committed.
+            if unique_code_state(purchase) not in {2, 3, 4}:
+                await digiseller.mark_unique_code_delivered(code)
+        except Exception as exc:
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=event_external_order_id,
+                sale_id=sale_id,
+                pending_operation_id=pending_operation_id,
+                event_type="unique_code_mark_delivery_failed",
+                status="error",
+                message=str(exc),
+                payload={"unique_code": code, "invoice_id": invoice_id},
+            )
+            notify_admins(
+                f"⚠️ <b>{tr('Выдача отправлена, но статус кода Digiseller не обновлён', 'Delivery sent, but Digiseller code status was not updated')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return False
+        db.add_order_event(
+            marketplace="plati",
+            external_order_id=event_external_order_id,
+            sale_id=sale_id,
+            pending_operation_id=pending_operation_id,
+            event_type="unique_code_marked_delivered",
+            status="success",
+            payload={"unique_code": code},
+        )
+        return True
+
     async def process_unique_code_message(invoice_id: str, code: str) -> bool:
         db.add_order_event(
             marketplace="plati",
@@ -808,65 +870,30 @@ def create_app() -> FastAPI:
             if not existing and purchase.get("inv") not in (None, ""):
                 existing = db.get_sale_with_delivery(event.marketplace, str(purchase["inv"]))
             if existing and existing.get("delivery_id"):
-                if not await messenger.send_message("plati", invoice_id, str(existing["delivery_text"])):
-                    db.add_order_event(
-                        marketplace=event.marketplace,
-                        external_order_id=event.external_order_id,
-                        sale_id=int(existing["id"]),
-                        event_type="marketplace_message_failed",
-                        status="error",
-                        message="Cannot resend saved delivery",
-                        payload={"invoice_id": invoice_id},
-                    )
-                    raise RuntimeError("не удалось отправить сохранённую выдачу в чат Digiseller")
-                db.add_order_event(
-                    marketplace=event.marketplace,
-                    external_order_id=event.external_order_id,
+                await delivery_service.ensure_delivery_message_sent(
+                    existing,
+                    marketplace="plati",
+                    external_order_id=invoice_id,
                     sale_id=int(existing["id"]),
-                    event_type="marketplace_message_sent",
-                    status="success",
-                    message="Saved delivery was resent",
-                    payload={"invoice_id": invoice_id},
                 )
-                notify_admins(
-                    f"♻️ <b>{tr('Повторная отправка выдачи', 'Delivery resent')}</b>\n"
-                    f"{tr('Заказ', 'Order')}: <code>{escape(str(existing.get('marketplace')))}:{escape(str(existing.get('external_order_id')))}</code>\n"
-                    f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>"
-                , kind="pending")
+                await mark_unique_code_delivery(
+                    invoice_id=invoice_id,
+                    code=code,
+                    purchase=purchase,
+                    event_external_order_id=event.external_order_id,
+                    sale_id=int(existing["id"]),
+                )
                 return True
-            result = await delivery_service.handle_sale(event, notify_marketplace=False)
-            if not await messenger.send_message("plati", invoice_id, str(result["delivery_text"])):
-                db.add_order_event(
-                    marketplace=event.marketplace,
-                    external_order_id=event.external_order_id,
-                    sale_id=int(result["sale"]["id"]) if result.get("sale") else None,
-                    pending_operation_id=int(result["pending"]["id"]) if result.get("pending") else None,
-                    event_type="marketplace_message_failed",
-                    status="error",
-                    message="Cannot send delivery text to Digiseller chat",
-                    payload={"invoice_id": invoice_id, "status": result.get("status")},
-                )
-                raise RuntimeError("не удалось отправить выдачу в чат Digiseller")
-            db.add_order_event(
-                marketplace=event.marketplace,
-                external_order_id=event.external_order_id,
-                sale_id=int(result["sale"]["id"]) if result.get("sale") else None,
-                pending_operation_id=int(result["pending"]["id"]) if result.get("pending") else None,
-                event_type="marketplace_message_sent",
-                status="success",
-                payload={"invoice_id": invoice_id, "status": result.get("status")},
-            )
+            result = await delivery_service.handle_sale(event, notify_marketplace=True)
             notify_admins(sale_notification_text(result, source="Digiseller chat"), kind="new_purchases")
             if result.get("status") in {"delivered", "waiting_order_id"}:
-                await digiseller.mark_unique_code_delivered(code)
-                db.add_order_event(
-                    marketplace=event.marketplace,
-                    external_order_id=event.external_order_id,
+                await mark_unique_code_delivery(
+                    invoice_id=invoice_id,
+                    code=code,
+                    purchase=purchase,
+                    event_external_order_id=event.external_order_id,
                     sale_id=int(result["sale"]["id"]) if result.get("sale") else None,
                     pending_operation_id=int(result["pending"]["id"]) if result.get("pending") else None,
-                    event_type="unique_code_marked_delivered",
-                    status="success",
-                    payload={"unique_code": code},
                 )
             return True
         except DigisellerApiError as exc:
@@ -919,6 +946,12 @@ def create_app() -> FastAPI:
                 return operation
         return None
 
+    def order_ownership_error_text() -> str:
+        return tr(
+            "⚠️ Не удалось подтвердить этот ID заказа для текущего чата. Проверьте ID и попробуйте ещё раз.",
+            "⚠️ This order ID could not be verified for the current chat. Check the ID and try again.",
+        )
+
     async def process_free_reissue_command(invoice_id: str, text: str, message_key: str = "") -> bool:
         command = parse_chat_command(text)
         if not command:
@@ -934,12 +967,23 @@ def create_app() -> FastAPI:
         if not command["order_id"]:
             await messenger.send_message("plati", invoice_id, delivery_service.render_system_text("free_reissue_help"))
             return True
+        if not db.marketplace_chat_owns_order("plati", invoice_id, command["order_id"]):
+            await messenger.send_message("plati", invoice_id, order_ownership_error_text())
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=invoice_id,
+                event_type="free_reissue_ownership_rejected",
+                status="warning",
+                payload={"target_order_id": command["order_id"]},
+            )
+            return True
         try:
             result = await delivery_service.free_reissue(
                 command["order_id"],
                 idempotency_key=f"plati:{invoice_id}:free-reissue:{message_key or command['order_id']}",
             )
-            await messenger.send_message("plati", invoice_id, str(result["delivery_text"]))
+            if not await messenger.send_message("plati", invoice_id, str(result["delivery_text"])):
+                raise MarketplaceMessageError("Cannot send free reissue result to marketplace chat")
             notify_admins(
                 f"🔄 <b>{tr('Бесплатный перевыпуск', 'Free reissue')}</b>\n"
                 f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
@@ -947,6 +991,8 @@ def create_app() -> FastAPI:
                 f"{tr('Статус', 'Status')}: ✅ {tr('выполнено', 'completed')}"
             , kind="pending")
             return True
+        except MarketplaceMessageError:
+            raise
         except Exception as exc:
             log.exception("Cannot process free reissue command from chat %s", invoice_id)
             await messenger.send_message("plati", invoice_id, delivery_service.operation_error_text("reissue", exc))
@@ -971,9 +1017,20 @@ def create_app() -> FastAPI:
                 delivery_service.render_system_text("status_help", delivery_service.command_context("status")),
             )
             return True
+        if not db.marketplace_chat_owns_order(marketplace, chat_id, command["order_id"]):
+            await messenger.send_message(marketplace, chat_id, order_ownership_error_text())
+            db.add_order_event(
+                marketplace=marketplace,
+                external_order_id=chat_id,
+                event_type="subscription_status_ownership_rejected",
+                status="warning",
+                payload={"target_order_id": command["order_id"]},
+            )
+            return True
         try:
             result = await delivery_service.subscription_status(command["order_id"])
-            await messenger.send_message(marketplace, chat_id, str(result["delivery_text"]))
+            if not await messenger.send_message(marketplace, chat_id, str(result["delivery_text"])):
+                raise MarketplaceMessageError("Cannot send subscription status to marketplace chat")
             db.add_order_event(
                 marketplace=marketplace,
                 external_order_id=chat_id,
@@ -982,6 +1039,8 @@ def create_app() -> FastAPI:
                 payload={"target_order_id": command["order_id"]},
             )
             return True
+        except MarketplaceMessageError:
+            raise
         except Exception as exc:
             log.exception("Cannot process subscription status command from chat %s:%s", marketplace, chat_id)
             await messenger.send_message(
@@ -1078,8 +1137,9 @@ def create_app() -> FastAPI:
                 kind="pending",
             )
             return True
+        except DeliveryInProgressError:
+            return True
         except Exception as exc:
-            db.fail_pending_operation(int(operation["id"]), str(exc))
             db.add_order_event(
                 marketplace=str(operation["marketplace"]),
                 external_order_id=str(operation["external_order_id"]),
@@ -1327,18 +1387,87 @@ def create_app() -> FastAPI:
         if not pending_sales:
             return
 
+        cursor_candidate = last_seen
+        can_advance_cursor = True
         for sale in reversed(pending_sales):
             order_id = ggsel_order_id(sale)
+            existing = db.get_sale_with_delivery("ggsel", order_id)
+            if (
+                existing
+                and existing.get("delivery_id")
+                and str(existing.get("marketplace_message_status") or "") == "sent"
+            ):
+                if can_advance_cursor:
+                    cursor_candidate = order_id
+                continue
             try:
                 detail = await ggsel.order_info(order_id)
-            except Exception:
+            except Exception as exc:
                 log_poll_error("ggsel_order_info", f"Cannot read GGsel order info for {order_id}")
-                detail = {}
+                db.add_order_event(
+                    marketplace="ggsel",
+                    external_order_id=order_id,
+                    event_type="polling_sale_failed",
+                    status="error",
+                    message=str(exc),
+                    payload=sale,
+                )
+                if ggsel_order_error_is_permanent(exc):
+                    if can_advance_cursor:
+                        cursor_candidate = order_id
+                    continue
+                can_advance_cursor = False
+                continue
             payload = merge_sale_payload(sale, detail)
             try:
                 event = normalize_sale("ggsel", payload)
+            except ValueError as exc:
+                db.add_order_event(
+                    marketplace="ggsel",
+                    external_order_id=order_id,
+                    event_type="polling_sale_skipped",
+                    status="error",
+                    message=str(exc),
+                    payload=payload,
+                )
+                notify_admins(
+                    f"⚠️ <b>{tr('Продажа GGsel пропущена: некорректные данные', 'GGsel sale skipped: invalid data')}</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                    f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                    kind="errors",
+                )
+                if can_advance_cursor:
+                    cursor_candidate = order_id
+                continue
+            product = db.get_product_by_external(
+                event.marketplace,
+                event.external_product_id,
+                event.external_variant_id,
+            )
+            if not product or not int(product.get("enabled", 0)):
+                reason = "Product mapping is missing or disabled; sale will be retried"
+                db.add_order_event(
+                    marketplace="ggsel",
+                    external_order_id=order_id,
+                    event_type="polling_sale_deferred",
+                    status="error",
+                    message=reason,
+                    payload=payload,
+                )
+                notify_admins(
+                    f"⚠️ <b>{tr('Продажа GGsel без активного маппинга', 'GGsel sale has no active mapping')}</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                    f"{tr('Товар', 'Product')}: <code>{escape(event.external_product_id)}</code>",
+                    kind="errors",
+                )
+                can_advance_cursor = False
+                continue
+            try:
                 result = await delivery_service.handle_sale(event)
                 notify_admins(sale_notification_text(result, source="GGsel polling"), kind="new_purchases")
+            except DeliveryInProgressError:
+                can_advance_cursor = False
+                continue
             except Exception as exc:
                 db.add_order_event(
                     marketplace="ggsel",
@@ -1354,12 +1483,40 @@ def create_app() -> FastAPI:
                     f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
                     kind="errors",
                 )
-        db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
+                can_advance_cursor = False
+                continue
+            if can_advance_cursor:
+                cursor_candidate = order_id
+        if cursor_candidate != last_seen:
+            db.set_chat_cursor("ggsel", cursor_key, cursor_candidate)
 
     async def poll_marketplace_chats() -> None:
         last_unclaimed_unique_code_poll = 0.0
         while True:
             try:
+                for operation in db.recover_stale_pending_operations():
+                    target_order_id = str(operation.get("target_order_id") or "").strip()
+                    db.add_order_event(
+                        marketplace=str(operation["marketplace"]),
+                        external_order_id=str(operation["external_order_id"]),
+                        sale_id=int(operation["sale_id"]),
+                        pending_operation_id=int(operation["id"]),
+                        event_type="pending_processing_recovered",
+                        status="warning",
+                        payload={"target_order_id": target_order_id},
+                    )
+                    if not target_order_id or not marketplace_messages_configured(str(operation["marketplace"])):
+                        continue
+                    try:
+                        await delivery_service.complete_pending_operation(operation, target_order_id)
+                    except DeliveryInProgressError:
+                        continue
+                    except Exception as exc:
+                        log_poll_error(
+                            f"pending_recovery:{operation['id']}",
+                            f"Cannot recover pending operation {operation['id']}",
+                            exc,
+                        )
                 await process_digiseller_sale_notification_reminders()
                 await poll_digiseller_unique_code_chats()
                 now_monotonic = time.monotonic()
@@ -1390,6 +1547,8 @@ def create_app() -> FastAPI:
                         if not should_process:
                             if current_id == last_seen:
                                 should_process = True
+                            continue
+                        if not message_is_from_buyer(message):
                             continue
                         text = message_text(message)
                         if text and current_id != last_seen:
@@ -1485,8 +1644,9 @@ def create_app() -> FastAPI:
                             f"{tr('ID заказа', 'Order ID')}: <code>{escape(found_order_id)}</code>\n"
                             f"{tr('Статус', 'Status')}: <b>{escape(str(result.get('status') or 'delivered'))}</b>"
                         , kind="pending")
+                    except DeliveryInProgressError:
+                        continue
                     except Exception as exc:
-                        db.fail_pending_operation(int(operation["id"]), str(exc))
                         db.add_order_event(
                             marketplace=str(operation["marketplace"]),
                             external_order_id=str(operation["external_order_id"]),
@@ -1628,6 +1788,22 @@ def create_app() -> FastAPI:
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.url.path == "/" or request.url.path.startswith("/admin/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     def unsafe_admin_secret(value: str, *, minimum_length: int) -> bool:
         normalized = value.strip()
         return normalized.lower() in DEFAULT_ADMIN_SECRET_VALUES or len(normalized) < minimum_length
@@ -1660,11 +1836,33 @@ def create_app() -> FastAPI:
         admin_sessions.clear()
 
     def login_rate_key(request: Request, username: str) -> str:
+        del username
         client_host = request.client.host if request.client else "unknown"
-        return f"{client_host}:{username.strip().lower()}"
+        if client_host in {"127.0.0.1", "::1"}:
+            forwarded_host = request.headers.get("x-real-ip", "").strip()
+            if not forwarded_host:
+                forwarded_host = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+            try:
+                client_host = str(ipaddress.ip_address(forwarded_host))
+            except ValueError:
+                pass
+        return client_host
+
+    def cleanup_login_failures(now: float) -> None:
+        for key, timestamps in list(login_failures.items()):
+            recent = [timestamp for timestamp in timestamps if now - timestamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS]
+            if recent:
+                login_failures[key] = recent
+            else:
+                login_failures.pop(key, None)
+        if len(login_failures) > LOGIN_RATE_LIMIT_MAX_KEYS:
+            oldest = sorted(login_failures, key=lambda key: max(login_failures[key]))
+            for key in oldest[: len(login_failures) - LOGIN_RATE_LIMIT_MAX_KEYS]:
+                login_failures.pop(key, None)
 
     def check_login_rate_limit(key: str) -> None:
         now = time.monotonic()
+        cleanup_login_failures(now)
         recent = [timestamp for timestamp in login_failures.get(key, []) if now - timestamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS]
         login_failures[key] = recent
         if len(recent) >= LOGIN_RATE_LIMIT_MAX_FAILURES:
@@ -1672,19 +1870,21 @@ def create_app() -> FastAPI:
 
     def record_login_failure(key: str) -> None:
         now = time.monotonic()
+        cleanup_login_failures(now)
         login_failures[key] = [
             timestamp
             for timestamp in login_failures.get(key, [])
             if now - timestamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS
         ] + [now]
 
-    def require_admin(authorization: str | None = Header(default=None)) -> None:
+    def require_admin(authorization: str | None = Header(default=None)) -> str:
         ensure_admin_secrets_are_safe()
         token = ""
         if authorization and authorization.lower().startswith("bearer "):
             token = authorization[7:].strip()
         if not token or not valid_admin_session(token):
             raise HTTPException(status_code=401, detail="Invalid admin session")
+        return token
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -1827,6 +2027,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
         login_failures.pop(rate_key, None)
         return {"token": create_admin_session(), "username": runtime.get_text("admin_username")}
+
+    @app.post("/admin/api/logout", status_code=204)
+    async def admin_logout(token: str = Depends(require_admin)) -> Response:
+        admin_sessions.pop(token, None)
+        return Response(status_code=204)
 
     @app.get("/admin/api/status", dependencies=[Depends(require_admin)])
     async def admin_status() -> dict[str, Any]:
@@ -2075,9 +2280,10 @@ def create_app() -> FastAPI:
     @app.post("/admin/api/products", dependencies=[Depends(require_admin)])
     async def admin_product_upsert(payload: ProductMappingIn) -> dict[str, Any]:
         data = payload.model_dump()
-        data["marketplace"] = data["marketplace"].strip().lower()
-        if data["marketplace"] not in SUPPORTED_MARKETPLACES:
-            raise HTTPException(status_code=400, detail="Supported marketplaces: plati, digiseller, ggsel")
+        try:
+            data["marketplace"] = normalize_marketplace(data["marketplace"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Supported marketplaces: plati (Digiseller), ggsel") from exc
         data["external_product_id"] = data["external_product_id"].strip()
         data["external_variant_id"] = data["external_variant_id"].strip()
         data["action"] = data["action"].strip().lower() or "create"
@@ -2089,9 +2295,10 @@ def create_app() -> FastAPI:
     @app.put("/admin/api/products/{product_id}", dependencies=[Depends(require_admin)])
     async def admin_product_update(product_id: int, payload: ProductMappingIn) -> dict[str, Any]:
         data = payload.model_dump()
-        data["marketplace"] = data["marketplace"].strip().lower()
-        if data["marketplace"] not in SUPPORTED_MARKETPLACES:
-            raise HTTPException(status_code=400, detail="Supported marketplaces: plati, digiseller, ggsel")
+        try:
+            data["marketplace"] = normalize_marketplace(data["marketplace"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Supported marketplaces: plati (Digiseller), ggsel") from exc
         data["external_product_id"] = data["external_product_id"].strip()
         data["external_variant_id"] = data["external_variant_id"].strip()
         data["action"] = data["action"].strip().lower() or "create"
@@ -2115,7 +2322,14 @@ def create_app() -> FastAPI:
 
     @app.delete("/admin/api/products/{product_id}", dependencies=[Depends(require_admin)])
     async def admin_product_delete(product_id: int) -> dict[str, str]:
-        if not db.delete_product(product_id):
+        try:
+            deleted = db.delete_product(product_id)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Product mapping is referenced by existing operations and cannot be deleted",
+            ) from exc
+        if not deleted:
             raise HTTPException(status_code=404, detail="Product not found")
         return {"status": "deleted"}
 
@@ -2131,7 +2345,18 @@ def create_app() -> FastAPI:
         if not sale.get("delivery_id") or not sale.get("delivery_text"):
             raise HTTPException(status_code=400, detail="Sale has no saved delivery")
         chat_id = sale_chat_id(sale)
-        ok = await messenger.send_message(str(sale["marketplace"]), chat_id, str(sale["delivery_text"]))
+        if str(sale.get("marketplace_message_status") or "") == "sent":
+            ok = await messenger.send_message(str(sale["marketplace"]), chat_id, str(sale["delivery_text"]))
+        else:
+            try:
+                ok = await delivery_service.ensure_delivery_message_sent(
+                    sale,
+                    marketplace=str(sale["marketplace"]),
+                    external_order_id=chat_id,
+                    sale_id=int(sale["id"]),
+                )
+            except (MarketplaceMessageError, DeliveryInProgressError):
+                ok = False
         db.add_order_event(
             marketplace=str(sale["marketplace"]),
             external_order_id=str(sale["external_order_id"]),

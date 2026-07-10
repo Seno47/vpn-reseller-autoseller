@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 
 PRODUCT_MAPPINGS_SCHEMA = """
@@ -40,6 +42,8 @@ CREATE TABLE IF NOT EXISTS sales (
     currency TEXT,
     raw_payload TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    processing_token TEXT NOT NULL DEFAULT '',
+    processing_started_at TEXT NOT NULL DEFAULT '',
     UNIQUE (marketplace, external_order_id)
 );
 
@@ -51,9 +55,15 @@ CREATE TABLE IF NOT EXISTS deliveries (
     subscription_url TEXT NOT NULL,
     panel_username TEXT NOT NULL,
     tariff_code TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT '',
     delivery_text TEXT NOT NULL,
     raw_response TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    marketplace_message_status TEXT NOT NULL DEFAULT 'pending',
+    marketplace_message_claim_token TEXT NOT NULL DEFAULT '',
+    marketplace_message_claimed_at TEXT NOT NULL DEFAULT '',
+    marketplace_message_sent_at TEXT NOT NULL DEFAULT '',
+    marketplace_message_error TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (sale_id) REFERENCES sales(id),
     FOREIGN KEY (product_mapping_id) REFERENCES product_mappings(id)
 );
@@ -92,6 +102,12 @@ CREATE TABLE IF NOT EXISTS pending_operations (
     raw_response TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    processing_token TEXT NOT NULL DEFAULT '',
+    request_message_status TEXT NOT NULL DEFAULT 'pending',
+    request_message_claim_token TEXT NOT NULL DEFAULT '',
+    request_message_claimed_at TEXT NOT NULL DEFAULT '',
+    request_message_sent_at TEXT NOT NULL DEFAULT '',
+    request_message_error TEXT NOT NULL DEFAULT '',
     UNIQUE (sale_id),
     FOREIGN KEY (sale_id) REFERENCES sales(id),
     FOREIGN KEY (product_mapping_id) REFERENCES product_mappings(id)
@@ -127,17 +143,29 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def utc_before(seconds: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=max(0, seconds))).replace(microsecond=0).isoformat()
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def init(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
+        # Schema migrations deliberately run with FK enforcement disabled: a
+        # product_mappings upgrade has to replace the parent table while its
+        # historical rows are still referenced. Normal application
+        # connections enable enforcement in ``connect`` below.
+        with self._connect(enforce_foreign_keys=False) as conn:
             self._ensure_product_mappings(conn)
             conn.executescript(SCHEMA)
             self._ensure_sales_variant(conn)
+            self._ensure_sales_processing(conn)
+            self._ensure_delivery_action(conn)
+            self._ensure_delivery_message_state(conn)
             self._ensure_pending_operations(conn)
+            self._repair_product_mapping_foreign_keys(conn)
             self._normalize_delivery_texts(conn)
 
     def _table_exists(self, conn: sqlite3.Connection, table: str) -> bool:
@@ -164,26 +192,221 @@ class Database:
                 conn.execute("ALTER TABLE product_mappings ADD COLUMN action_params TEXT NOT NULL DEFAULT '{}'")
             return
 
-        conn.execute("ALTER TABLE product_mappings RENAME TO product_mappings_legacy")
-        conn.executescript(PRODUCT_MAPPINGS_SCHEMA)
+        # Do not rename the old parent table. On modern SQLite versions a
+        # parent rename also rewrites child-table FK declarations, which left
+        # them pointing at product_mappings_legacy after that table was
+        # dropped. Build the replacement alongside it instead.
+        replacement = f"product_mappings_migration_{uuid4().hex}"
+        replacement_schema = PRODUCT_MAPPINGS_SCHEMA.replace(
+            "CREATE TABLE IF NOT EXISTS product_mappings",
+            f'CREATE TABLE "{replacement}"',
+            1,
+        )
+        conn.execute(replacement_schema)
+        action_expr = "action" if "action" in columns else "'create'"
+        action_params_expr = "action_params" if "action_params" in columns else "'{}'"
         conn.execute(
-            """
-            INSERT INTO product_mappings
-                (id, marketplace, external_product_id, external_variant_id, tariff_code,
-                 title, enabled, delivery_template, created_at, updated_at)
-            SELECT id, marketplace, external_product_id, '', tariff_code,
-                   title, enabled, delivery_template, created_at, updated_at
-            FROM product_mappings_legacy
+            f"""
+            INSERT INTO "{replacement}"
+                (id, marketplace, external_product_id, external_variant_id, action, action_params,
+                 tariff_code, title, enabled, delivery_template, created_at, updated_at)
+            SELECT id, marketplace, external_product_id, '', {action_expr}, {action_params_expr},
+                   tariff_code, title, enabled, delivery_template, created_at, updated_at
+            FROM product_mappings
             """
         )
-        conn.execute("DROP TABLE product_mappings_legacy")
+        conn.execute("DROP TABLE product_mappings")
+        conn.execute(f'ALTER TABLE "{replacement}" RENAME TO product_mappings')
 
     def _ensure_sales_variant(self, conn: sqlite3.Connection) -> None:
         if "external_variant_id" not in self._columns(conn, "sales"):
             conn.execute("ALTER TABLE sales ADD COLUMN external_variant_id TEXT NOT NULL DEFAULT ''")
 
+    def _ensure_sales_processing(self, conn: sqlite3.Connection) -> None:
+        columns = self._columns(conn, "sales")
+        if "processing_token" not in columns:
+            conn.execute("ALTER TABLE sales ADD COLUMN processing_token TEXT NOT NULL DEFAULT ''")
+        if "processing_started_at" not in columns:
+            conn.execute("ALTER TABLE sales ADD COLUMN processing_started_at TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_delivery_action(self, conn: sqlite3.Connection) -> None:
+        columns = self._columns(conn, "deliveries")
+        if "action" in columns:
+            return
+        conn.execute("ALTER TABLE deliveries ADD COLUMN action TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            UPDATE deliveries
+            SET action=COALESCE(
+                (SELECT pm.action FROM product_mappings pm WHERE pm.id=deliveries.product_mapping_id),
+                ''
+            )
+            """
+        )
+
+    def _ensure_delivery_message_state(self, conn: sqlite3.Connection) -> None:
+        columns = self._columns(conn, "deliveries")
+        existing_rows_have_unknown_state = "marketplace_message_status" not in columns
+        additions = {
+            "marketplace_message_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "marketplace_message_claim_token": "TEXT NOT NULL DEFAULT ''",
+            "marketplace_message_claimed_at": "TEXT NOT NULL DEFAULT ''",
+            "marketplace_message_sent_at": "TEXT NOT NULL DEFAULT ''",
+            "marketplace_message_error": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE deliveries ADD COLUMN {name} {definition}")
+        if existing_rows_have_unknown_state:
+            # Old versions saved a delivery only after attempting the marketplace
+            # response. Treat historical rows as sent so an upgrade cannot spam
+            # every old buyer on the next duplicate notification.
+            cursor = conn.execute(
+                """
+                UPDATE deliveries
+                SET marketplace_message_status='sent',
+                    marketplace_message_sent_at=created_at
+                """
+            )
+
     def _ensure_pending_operations(self, conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA)
+        columns = self._columns(conn, "pending_operations")
+        if "processing_token" not in columns:
+            conn.execute("ALTER TABLE pending_operations ADD COLUMN processing_token TEXT NOT NULL DEFAULT ''")
+        existing_rows_have_unknown_message_state = "request_message_status" not in columns
+        additions = {
+            "request_message_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "request_message_claim_token": "TEXT NOT NULL DEFAULT ''",
+            "request_message_claimed_at": "TEXT NOT NULL DEFAULT ''",
+            "request_message_sent_at": "TEXT NOT NULL DEFAULT ''",
+            "request_message_error": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE pending_operations ADD COLUMN {name} {definition}")
+        if existing_rows_have_unknown_message_state:
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET request_message_status='sent',
+                    request_message_sent_at=created_at
+                """
+            )
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    def _repair_product_mapping_foreign_keys(self, conn: sqlite3.Connection) -> None:
+        # Releases affected by the old parent-table migration can have one or
+        # both child tables referencing a table that no longer exists. Rebuild
+        # only those tables; the original CREATE statement keeps every column
+        # and constraint, while explicit indexes/triggers are restored below.
+        for table in ("deliveries", "pending_operations"):
+            if not self._table_exists(conn, table):
+                continue
+            targets = {
+                str(row["table"])
+                for row in conn.execute(
+                    f"PRAGMA foreign_key_list({self._quote_identifier(table)})"
+                ).fetchall()
+            }
+            if "product_mappings_legacy" in targets:
+                self._rebuild_table_with_repaired_product_mapping_fk(conn, table)
+
+    def _rebuild_table_with_repaired_product_mapping_fk(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+    ) -> None:
+        table_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if not table_row or not table_row["sql"]:
+            raise RuntimeError(f"Cannot repair SQLite schema for {table}")
+
+        original_sql = str(table_row["sql"])
+        reference_pattern = re.compile(
+            r"(\bREFERENCES\s+)"
+            r"(?:\"product_mappings_legacy\"|`product_mappings_legacy`|"
+            r"\[product_mappings_legacy\]|'product_mappings_legacy'|product_mappings_legacy)"
+            r"(?=\s*\()",
+            re.IGNORECASE,
+        )
+        corrected_sql, replacement_count = reference_pattern.subn(
+            r'\1"product_mappings"',
+            original_sql,
+        )
+        if replacement_count == 0:
+            raise RuntimeError(f"Cannot find broken product mapping reference in {table}")
+
+        temporary_table = f"__{table}_fk_repair_{uuid4().hex}"
+        quoted_table_pattern = (
+            rf'(?:"{re.escape(table)}"|`{re.escape(table)}`|'
+            rf"\[{re.escape(table)}\]|'{re.escape(table)}'|{re.escape(table)})"
+        )
+        create_pattern = re.compile(
+            rf"^(\s*CREATE\s+TABLE\s+)(?:IF\s+NOT\s+EXISTS\s+)?{quoted_table_pattern}",
+            re.IGNORECASE,
+        )
+        temporary_sql, create_replacement_count = create_pattern.subn(
+            lambda match: match.group(1) + self._quote_identifier(temporary_table),
+            corrected_sql,
+            count=1,
+        )
+        if create_replacement_count != 1:
+            raise RuntimeError(f"Cannot prepare repaired SQLite schema for {table}")
+
+        schema_objects = conn.execute(
+            """
+            SELECT type, name, sql
+            FROM sqlite_master
+            WHERE tbl_name=? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+            ORDER BY type, name
+            """,
+            (table,),
+        ).fetchall()
+        table_info = conn.execute(
+            f"PRAGMA table_xinfo({self._quote_identifier(table)})"
+        ).fetchall()
+        copied_columns = [
+            str(row["name"])
+            for row in table_info
+            if int(row["hidden"] if "hidden" in row.keys() else 0) == 0
+        ]
+        if not copied_columns:
+            raise RuntimeError(f"Cannot copy SQLite rows while repairing {table}")
+
+        original_row_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {self._quote_identifier(table)}"
+            ).fetchone()[0]
+        )
+        conn.execute(temporary_sql)
+        column_list = ", ".join(self._quote_identifier(name) for name in copied_columns)
+        conn.execute(
+            f"INSERT INTO {self._quote_identifier(temporary_table)} ({column_list}) "
+            f"SELECT {column_list} FROM {self._quote_identifier(table)}"
+        )
+        copied_row_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {self._quote_identifier(temporary_table)}"
+            ).fetchone()[0]
+        )
+        if copied_row_count != original_row_count:
+            raise RuntimeError(
+                f"SQLite schema repair for {table} copied {copied_row_count} "
+                f"of {original_row_count} rows"
+            )
+        conn.execute(f"DROP TABLE {self._quote_identifier(table)}")
+        conn.execute(
+            f"ALTER TABLE {self._quote_identifier(temporary_table)} "
+            f"RENAME TO {self._quote_identifier(table)}"
+        )
+        for schema_object in schema_objects:
+            conn.execute(str(schema_object["sql"]))
 
     def _normalize_delivery_texts(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -195,9 +418,14 @@ class Database:
         )
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, enforce_foreign_keys: bool) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA foreign_keys={'ON' if enforce_foreign_keys else 'OFF'}")
+        actual_foreign_keys = int(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        if actual_foreign_keys != int(enforce_foreign_keys):
+            conn.close()
+            raise RuntimeError("SQLite did not apply the requested foreign-key mode")
         try:
             yield conn
             conn.commit()
@@ -206,6 +434,11 @@ class Database:
             raise
         finally:
             conn.close()
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        with self._connect(enforce_foreign_keys=True) as conn:
+            yield conn
 
     def list_products(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -216,6 +449,11 @@ class Database:
                 """
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_product(self, product_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM product_mappings WHERE id=?", (product_id,)).fetchone()
+            return dict(row) if row else None
 
     @staticmethod
     def _json_text(value: Any) -> str:
@@ -261,6 +499,7 @@ class Database:
                     now,
                 ),
             )
+
             row = conn.execute(
                 """
                 SELECT * FROM product_mappings
@@ -327,32 +566,50 @@ class Database:
         external_product_id: str,
         external_variant_id: str = "",
     ) -> dict[str, Any] | None:
+        # Digiseller is the API behind Plati.Market.  Older releases allowed
+        # mappings to be stored under either name, while incoming sales are
+        # canonicalized to ``plati``.  Prefer the canonical row, but keep old
+        # databases working without a destructive migration (there may be a
+        # row under both names).
+        marketplaces = (
+            ("plati", "digiseller")
+            if str(marketplace).strip().lower() in {"plati", "digiseller"}
+            else (marketplace,)
+        )
         with self.connect() as conn:
             if external_variant_id:
+                for candidate in marketplaces:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM product_mappings
+                        WHERE marketplace=? AND external_product_id=? AND external_variant_id=?
+                        """,
+                        (candidate, external_product_id, external_variant_id),
+                    ).fetchone()
+                    if row:
+                        return dict(row)
+            for candidate in marketplaces:
                 row = conn.execute(
                     """
                     SELECT * FROM product_mappings
-                    WHERE marketplace=? AND external_product_id=? AND external_variant_id=?
+                    WHERE marketplace=? AND external_product_id=? AND external_variant_id=''
                     """,
-                    (marketplace, external_product_id, external_variant_id),
+                    (candidate, external_product_id),
                 ).fetchone()
                 if row:
                     return dict(row)
-            row = conn.execute(
-                """
-                SELECT * FROM product_mappings
-                WHERE marketplace=? AND external_product_id=? AND external_variant_id=''
-                """,
-                (marketplace, external_product_id),
-            ).fetchone()
-            return dict(row) if row else None
+            return None
 
     def get_sale_with_delivery(self, marketplace: str, external_order_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
                 SELECT s.*, d.id AS delivery_id, d.xyranet_order_id, d.subscription_url,
-                       d.panel_username, d.tariff_code AS delivered_tariff_code, d.delivery_text
+                       d.panel_username, d.tariff_code AS delivered_tariff_code, d.delivery_text,
+                       d.raw_response AS delivery_raw_response,
+                       d.marketplace_message_status, d.marketplace_message_claim_token,
+                       d.marketplace_message_claimed_at, d.marketplace_message_sent_at,
+                       d.marketplace_message_error
                 FROM sales s
                 LEFT JOIN deliveries d ON d.sale_id = s.id
                 WHERE s.marketplace=? AND s.external_order_id=?
@@ -366,7 +623,11 @@ class Database:
             row = conn.execute(
                 """
                 SELECT s.*, d.id AS delivery_id, d.xyranet_order_id, d.subscription_url,
-                       d.panel_username, d.tariff_code AS delivered_tariff_code, d.delivery_text
+                       d.panel_username, d.tariff_code AS delivered_tariff_code, d.delivery_text,
+                       d.raw_response AS delivery_raw_response,
+                       d.marketplace_message_status, d.marketplace_message_claim_token,
+                       d.marketplace_message_claimed_at, d.marketplace_message_sent_at,
+                       d.marketplace_message_error
                 FROM sales s
                 LEFT JOIN deliveries d ON d.sale_id = s.id
                 WHERE s.id=?
@@ -390,6 +651,33 @@ class Database:
                 LIMIT 1
                 """,
                 (invoice, f"{invoice}:%"),
+            ).fetchone()
+            return row is not None
+
+    def marketplace_chat_owns_order(self, marketplace: str, external_order_id: str, xyranet_order_id: str) -> bool:
+        selected_marketplace = str(marketplace or "").strip().lower()
+        chat_id = str(external_order_id or "").strip()
+        order_id = str(xyranet_order_id or "").strip()
+        if not selected_marketplace or not chat_id or not order_id:
+            return False
+        marketplaces = ("plati", "digiseller") if selected_marketplace in {"plati", "digiseller"} else (selected_marketplace,)
+        placeholders = ", ".join("?" for _ in marketplaces)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM sales s
+                JOIN deliveries d ON d.sale_id=s.id
+                WHERE s.marketplace IN ({placeholders})
+                  AND d.xyranet_order_id=?
+                  AND d.action='create'
+                  AND (
+                    s.external_order_id=?
+                    OR substr(s.external_order_id, 1, length(?) + 1)=? || ':'
+                  )
+                LIMIT 1
+                """,
+                (*marketplaces, order_id, chat_id, chat_id, chat_id),
             ).fetchone()
             return row is not None
 
@@ -421,14 +709,57 @@ class Database:
             ).fetchone()
             return dict(row)
 
+    def claim_sale_processing(self, sale_id: int, *, stale_after_seconds: int = 7200) -> str | None:
+        token = uuid4().hex
+        now = utcnow()
+        stale_before = utc_before(stale_after_seconds)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE sales
+                SET processing_token=?, processing_started_at=?
+                WHERE id=?
+                  AND (
+                    processing_token=''
+                    OR processing_started_at=''
+                    OR processing_started_at<=?
+                  )
+                """,
+                (token, now, sale_id, stale_before),
+            )
+            return token if cursor.rowcount == 1 else None
+
+    def refresh_sale_processing(self, sale_id: int, token: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE sales SET processing_started_at=? WHERE id=? AND processing_token=?",
+                (utcnow(), sale_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def release_sale_processing(self, sale_id: int, token: str) -> None:
+        if not token:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sales
+                SET processing_token='', processing_started_at=''
+                WHERE id=? AND processing_token=?
+                """,
+                (sale_id, token),
+            )
+
     def create_delivery(self, sale_id: int, product_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO deliveries
                     (sale_id, product_mapping_id, xyranet_order_id, subscription_url, panel_username,
-                     tariff_code, delivery_text, raw_response, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     tariff_code, action, delivery_text, raw_response, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sale_id,
@@ -437,6 +768,13 @@ class Database:
                     payload["subscription_url"],
                     payload["panel_username"],
                     payload["tariff_code"],
+                    payload.get("action")
+                    or str(
+                        (
+                            conn.execute("SELECT action FROM product_mappings WHERE id=?", (product_id,)).fetchone()
+                            or {"action": ""}
+                        )["action"]
+                    ),
                     payload["delivery_text"],
                     json.dumps(payload["raw_response"], ensure_ascii=False, sort_keys=True),
                     utcnow(),
@@ -447,6 +785,70 @@ class Database:
                 (sale_id,),
             ).fetchone()
             return dict(row)
+
+    def get_delivery(self, delivery_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+            return dict(row) if row else None
+
+    def claim_delivery_message(self, delivery_id: int, *, stale_after_seconds: int = 600) -> str | None:
+        token = uuid4().hex
+        now = utcnow()
+        stale_before = utc_before(stale_after_seconds)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE deliveries
+                SET marketplace_message_status='sending',
+                    marketplace_message_claim_token=?,
+                    marketplace_message_claimed_at=?,
+                    marketplace_message_error=''
+                WHERE id=?
+                  AND marketplace_message_status!='sent'
+                  AND (
+                    marketplace_message_status!='sending'
+                    OR marketplace_message_claimed_at=''
+                    OR marketplace_message_claimed_at<=?
+                  )
+                """,
+                (token, now, delivery_id, stale_before),
+            )
+            return token if cursor.rowcount == 1 else None
+
+    def mark_delivery_message_sent(self, delivery_id: int, token: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE deliveries
+                SET marketplace_message_status='sent',
+                    marketplace_message_claim_token='',
+                    marketplace_message_claimed_at='',
+                    marketplace_message_sent_at=?,
+                    marketplace_message_error=''
+                WHERE id=? AND marketplace_message_claim_token=?
+                """,
+                (utcnow(), delivery_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def mark_delivery_message_failed(self, delivery_id: int, token: str, error_text: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE deliveries
+                SET marketplace_message_status='pending',
+                    marketplace_message_claim_token='',
+                    marketplace_message_claimed_at='',
+                    marketplace_message_error=?
+                WHERE id=? AND marketplace_message_claim_token=?
+                """,
+                (error_text, delivery_id, token),
+            )
+            return cursor.rowcount == 1
 
     def create_pending_operation(
         self,
@@ -466,12 +868,7 @@ class Database:
                     (sale_id, product_mapping_id, marketplace, external_order_id, action,
                      action_params, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, 'waiting_order_id', ?, ?)
-                ON CONFLICT(sale_id) DO UPDATE SET
-                    product_mapping_id=excluded.product_mapping_id,
-                    action=excluded.action,
-                    action_params=excluded.action_params,
-                    status='waiting_order_id',
-                    updated_at=excluded.updated_at
+                ON CONFLICT(sale_id) DO NOTHING
                 """,
                 (
                     sale_id,
@@ -487,10 +884,116 @@ class Database:
             row = conn.execute("SELECT * FROM pending_operations WHERE sale_id=?", (sale_id,)).fetchone()
             return dict(row)
 
+    def claim_pending_request_message(self, operation_id: int, *, stale_after_seconds: int = 600) -> str | None:
+        token = uuid4().hex
+        now = utcnow()
+        stale_before = utc_before(stale_after_seconds)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET request_message_status='sending',
+                    request_message_claim_token=?,
+                    request_message_claimed_at=?,
+                    request_message_error=''
+                WHERE id=?
+                  AND request_message_status!='sent'
+                  AND (
+                    request_message_status!='sending'
+                    OR request_message_claimed_at=''
+                    OR request_message_claimed_at<=?
+                  )
+                """,
+                (token, now, operation_id, stale_before),
+            )
+            return token if cursor.rowcount == 1 else None
+
+    def mark_pending_request_message_sent(self, operation_id: int, token: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET request_message_status='sent',
+                    request_message_claim_token='',
+                    request_message_claimed_at='',
+                    request_message_sent_at=?,
+                    request_message_error=''
+                WHERE id=? AND request_message_claim_token=?
+                """,
+                (utcnow(), operation_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def mark_pending_request_message_failed(self, operation_id: int, token: str, error_text: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET request_message_status='pending',
+                    request_message_claim_token='',
+                    request_message_claimed_at='',
+                    request_message_error=?
+                WHERE id=? AND request_message_claim_token=?
+                """,
+                (error_text, operation_id, token),
+            )
+            return cursor.rowcount == 1
+
     def get_pending_operation_by_sale(self, sale_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM pending_operations WHERE sale_id=?", (sale_id,)).fetchone()
             return dict(row) if row else None
+
+    def get_pending_operation(self, operation_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
+            return dict(row) if row else None
+
+    def claim_pending_operation(
+        self,
+        operation_id: int,
+        *,
+        target_order_id: str,
+        stale_after_seconds: int = 7200,
+    ) -> dict[str, Any] | None:
+        token = uuid4().hex
+        now = utcnow()
+        stale_before = utc_before(stale_after_seconds)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET status='processing',
+                    target_order_id=?,
+                    processing_token=?,
+                    error_text='',
+                    updated_at=?
+                WHERE id=?
+                  AND (
+                    status IN ('waiting_order_id', 'error')
+                    OR (status='processing' AND updated_at<=?)
+                  )
+                """,
+                (target_order_id, token, now, operation_id, stale_before),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
+            return dict(row) if row else None
+
+    def refresh_pending_processing(self, operation_id: int, token: str) -> bool:
+        if not token:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE pending_operations SET updated_at=? WHERE id=? AND processing_token=? AND status='processing'",
+                (utcnow(), operation_id, token),
+            )
+            return cursor.rowcount == 1
 
     def list_pending_operations(self, status: str | None = "waiting_order_id") -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -508,6 +1011,41 @@ class Database:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def recover_stale_pending_operations(self, *, stale_after_seconds: int = 7200) -> list[dict[str, Any]]:
+        stale_before = utc_before(stale_after_seconds)
+        now = utcnow()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM pending_operations
+                WHERE status='processing' AND updated_at<=?
+                ORDER BY id
+                """,
+                (stale_before,),
+            ).fetchall()
+            if not rows:
+                return []
+            ids = [int(row["id"]) for row in rows]
+            placeholders = ", ".join("?" for _ in ids)
+            conn.execute(
+                f"""
+                UPDATE pending_operations
+                SET status='waiting_order_id',
+                    processing_token='',
+                    error_text='Recovered stale processing claim',
+                    updated_at=?
+                WHERE status='processing'
+                  AND updated_at<=?
+                  AND id IN ({placeholders})
+                """,
+                (now, stale_before, *ids),
+            )
+            recovered = conn.execute(
+                f"SELECT * FROM pending_operations WHERE id IN ({placeholders}) ORDER BY id",
+                ids,
+            ).fetchall()
+            return [dict(row) for row in recovered if str(row["status"]) == "waiting_order_id"]
+
     def update_pending_last_message(self, operation_id: int, last_message_id: str) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -522,50 +1060,72 @@ class Database:
         target_order_id: str,
         result_text: str,
         raw_response: Any,
+        claim_token: str = "",
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
-            conn.execute(
+            token_clause = " AND processing_token=?" if claim_token else ""
+            params: list[Any] = [
+                target_order_id,
+                result_text,
+                json.dumps(raw_response, ensure_ascii=False, sort_keys=True),
+                utcnow(),
+                operation_id,
+            ]
+            if claim_token:
+                params.append(claim_token)
+            cursor = conn.execute(
                 """
                 UPDATE pending_operations
                 SET status='completed',
                     target_order_id=?,
                     result_text=?,
                     raw_response=?,
+                    error_text='',
+                    processing_token='',
                     updated_at=?
                 WHERE id=?
-                """,
-                (
-                    target_order_id,
-                    result_text,
-                    json.dumps(raw_response, ensure_ascii=False, sort_keys=True),
-                    utcnow(),
-                    operation_id,
-                ),
+                """ + token_clause,
+                params,
             )
+            if cursor.rowcount != 1:
+                return None
             row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
             return dict(row) if row else None
 
-    def fail_pending_operation(self, operation_id: int, error_text: str) -> dict[str, Any] | None:
+    def fail_pending_operation(self, operation_id: int, error_text: str, *, claim_token: str = "") -> dict[str, Any] | None:
         with self.connect() as conn:
-            conn.execute(
-                "UPDATE pending_operations SET status='error', error_text=?, updated_at=? WHERE id=?",
-                (error_text, utcnow(), operation_id),
+            token_clause = " AND processing_token=?" if claim_token else ""
+            params: list[Any] = [error_text, utcnow(), operation_id]
+            if claim_token:
+                params.append(claim_token)
+            cursor = conn.execute(
+                """
+                UPDATE pending_operations
+                SET status='error', error_text=?, processing_token='', updated_at=?
+                WHERE id=?
+                """ + token_clause,
+                params,
             )
+            if cursor.rowcount != 1:
+                return None
             row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
             return dict(row) if row else None
 
     def retry_pending_operation(self, operation_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE pending_operations
                 SET status='waiting_order_id',
                     error_text='',
+                    processing_token='',
                     updated_at=?
-                WHERE id=?
+                WHERE id=? AND status='error'
                 """,
                 (utcnow(), operation_id),
             )
+            if cursor.rowcount == 0:
+                return None
             row = conn.execute("SELECT * FROM pending_operations WHERE id=?", (operation_id,)).fetchone()
             return dict(row) if row else None
 
@@ -725,14 +1285,20 @@ class Database:
             return {str(row["key"]): str(row["value"]) for row in rows}
 
     def set_setting(self, key: str, value: str) -> None:
+        self.set_settings({key: value})
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        if not values:
+            return
+        now = utcnow()
         with self.connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO app_settings (key, value, updated_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
                 """,
-                (key, value, utcnow()),
+                [(key, value, now) for key, value in values.items()],
             )
 
     def list_bot_users(self) -> list[dict[str, Any]]:
