@@ -121,6 +121,57 @@ CREATE TABLE IF NOT EXISTS marketplace_chat_cursors (
     PRIMARY KEY (marketplace, external_order_id)
 );
 
+CREATE TABLE IF NOT EXISTS marketplace_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    marketplace TEXT NOT NULL,
+    external_order_id TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    external_message_id TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL,
+    author_name TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    is_file INTEGER NOT NULL DEFAULT 0,
+    file_name TEXT NOT NULL DEFAULT '',
+    file_url TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    message_date TEXT NOT NULL DEFAULT '',
+    raw_payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE (marketplace, external_order_id, message_key)
+);
+
+CREATE INDEX IF NOT EXISTS marketplace_chat_messages_order_idx
+ON marketplace_chat_messages (marketplace, external_order_id, id);
+
+CREATE TABLE IF NOT EXISTS quick_reply_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_reply_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    marketplace TEXT NOT NULL,
+    external_order_id TEXT NOT NULL,
+    telegram_user_id INTEGER NOT NULL,
+    author_name TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    template_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'draft',
+    claim_token TEXT NOT NULL DEFAULT '',
+    error_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (template_id) REFERENCES quick_reply_templates(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS chat_reply_drafts_user_idx
+ON chat_reply_drafts (telegram_user_id, status, id);
+
 CREATE TABLE IF NOT EXISTS order_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     marketplace TEXT NOT NULL,
@@ -1176,6 +1227,305 @@ class Database:
             params = (selected_limit,)
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, params)]
+
+    def add_chat_message(
+        self,
+        *,
+        marketplace: str,
+        external_order_id: str,
+        role: str,
+        text: str = "",
+        external_message_id: str = "",
+        message_key: str = "",
+        author_name: str = "",
+        source: str = "",
+        message_date: str = "",
+        is_file: bool = False,
+        file_name: str = "",
+        file_url: str = "",
+        raw_payload: Any | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        selected_marketplace = str(marketplace or "").strip()
+        selected_order_id = str(external_order_id or "").strip()
+        if not selected_marketplace or not selected_order_id:
+            raise ValueError("marketplace and external_order_id are required")
+        selected_role = str(role or "system").strip().lower()
+        if selected_role not in {"buyer", "seller", "admin", "bot", "system"}:
+            selected_role = "system"
+        remote_id = str(external_message_id or "").strip()
+        selected_key = str(message_key or "").strip()
+        if not selected_key:
+            selected_key = f"remote:{remote_id}" if remote_id else f"local:{uuid4().hex}"
+        now = utcnow()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO marketplace_chat_messages
+                    (marketplace, external_order_id, message_key, external_message_id,
+                     role, author_name, text, is_file, file_name, file_url, source,
+                     message_date, raw_payload, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    selected_marketplace,
+                    selected_order_id,
+                    selected_key,
+                    remote_id,
+                    selected_role,
+                    str(author_name or "").strip(),
+                    str(text or ""),
+                    1 if is_file else 0,
+                    str(file_name or "").strip(),
+                    str(file_url or "").strip(),
+                    str(source or "").strip(),
+                    str(message_date or "").strip(),
+                    json.dumps(raw_payload or {}, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM marketplace_chat_messages
+                WHERE marketplace=? AND external_order_id=? AND message_key=?
+                """,
+                (selected_marketplace, selected_order_id, selected_key),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("Cannot save marketplace chat message")
+            return dict(row), cursor.rowcount > 0
+
+    def get_chat_message(self, message_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM marketplace_chat_messages WHERE id=?",
+                (int(message_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_chat_messages(
+        self,
+        marketplace: str,
+        external_order_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        selected_limit = max(1, min(int(limit), 2000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM marketplace_chat_messages
+                WHERE marketplace=? AND external_order_id=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (str(marketplace), str(external_order_id), selected_limit),
+            ).fetchall()
+            return [dict(row) for row in reversed(rows)]
+
+    def count_chat_messages(self, marketplace: str, external_order_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(1) AS cnt FROM marketplace_chat_messages
+                WHERE marketplace=? AND external_order_id=?
+                """,
+                (str(marketplace), str(external_order_id)),
+            ).fetchone()
+            return int(row["cnt"] if row else 0)
+
+    def find_recent_chat_message_by_text(
+        self,
+        marketplace: str,
+        external_order_id: str,
+        text: str,
+        *,
+        roles: tuple[str, ...] = ("bot", "admin", "seller"),
+        within_seconds: int = 300,
+    ) -> dict[str, Any] | None:
+        if not roles:
+            return None
+        placeholders = ",".join("?" for _ in roles)
+        query = f"""
+            SELECT * FROM marketplace_chat_messages
+            WHERE marketplace=? AND external_order_id=? AND text=?
+              AND role IN ({placeholders}) AND created_at>=?
+            ORDER BY id DESC LIMIT 1
+        """
+        params: tuple[Any, ...] = (
+            str(marketplace),
+            str(external_order_id),
+            str(text),
+            *roles,
+            utc_before(within_seconds),
+        )
+        with self.connect() as conn:
+            row = conn.execute(query, params).fetchone()
+            return dict(row) if row else None
+
+    def list_quick_reply_templates(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM quick_reply_templates"
+        if enabled_only:
+            query += " WHERE enabled=1"
+        query += " ORDER BY id"
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query)]
+
+    def get_quick_reply_template(self, template_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM quick_reply_templates WHERE id=?",
+                (int(template_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def create_quick_reply_template(self, title: str, body: str, *, created_by: int | None = None) -> dict[str, Any]:
+        selected_title = str(title or "").strip()
+        selected_body = str(body or "").strip()
+        if not selected_title or not selected_body:
+            raise ValueError("template title and body are required")
+        now = utcnow()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO quick_reply_templates
+                    (title, body, enabled, created_by, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?, ?)
+                """,
+                (selected_title, selected_body, created_by, now, now),
+            )
+            row = conn.execute("SELECT * FROM quick_reply_templates WHERE id=?", (cursor.lastrowid,)).fetchone()
+            return dict(row)
+
+    def update_quick_reply_template(
+        self,
+        template_id: int,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.get_quick_reply_template(template_id)
+        if not current:
+            return None
+        selected_title = str(current["title"] if title is None else title).strip()
+        selected_body = str(current["body"] if body is None else body).strip()
+        if not selected_title or not selected_body:
+            raise ValueError("template title and body are required")
+        selected_enabled = int(current["enabled"]) if enabled is None else (1 if enabled else 0)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE quick_reply_templates
+                SET title=?, body=?, enabled=?, updated_at=? WHERE id=?
+                """,
+                (selected_title, selected_body, selected_enabled, utcnow(), int(template_id)),
+            )
+            row = conn.execute("SELECT * FROM quick_reply_templates WHERE id=?", (int(template_id),)).fetchone()
+            return dict(row) if row else None
+
+    def delete_quick_reply_template(self, template_id: int) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM quick_reply_templates WHERE id=?", (int(template_id),))
+            return cursor.rowcount > 0
+
+    def create_chat_reply_draft(
+        self,
+        *,
+        marketplace: str,
+        external_order_id: str,
+        telegram_user_id: int,
+        body: str,
+        author_name: str = "",
+        template_id: int | None = None,
+    ) -> dict[str, Any]:
+        selected_body = str(body or "").strip()
+        if not selected_body:
+            raise ValueError("reply body is required")
+        now = utcnow()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO chat_reply_drafts
+                    (marketplace, external_order_id, telegram_user_id, author_name,
+                     body, template_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                """,
+                (
+                    str(marketplace),
+                    str(external_order_id),
+                    int(telegram_user_id),
+                    str(author_name or "").strip(),
+                    selected_body,
+                    template_id,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM chat_reply_drafts WHERE id=?", (cursor.lastrowid,)).fetchone()
+            return dict(row)
+
+    def get_chat_reply_draft(self, draft_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM chat_reply_drafts WHERE id=?", (int(draft_id),)).fetchone()
+            return dict(row) if row else None
+
+    def update_chat_reply_draft_body(self, draft_id: int, telegram_user_id: int, body: str) -> dict[str, Any] | None:
+        selected_body = str(body or "").strip()
+        if not selected_body:
+            raise ValueError("reply body is required")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_reply_drafts SET body=?, updated_at=?
+                WHERE id=? AND telegram_user_id=? AND status='draft'
+                """,
+                (selected_body, utcnow(), int(draft_id), int(telegram_user_id)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute("SELECT * FROM chat_reply_drafts WHERE id=?", (int(draft_id),)).fetchone()
+            return dict(row) if row else None
+
+    def claim_chat_reply_draft(self, draft_id: int, telegram_user_id: int) -> tuple[dict[str, Any], str] | None:
+        token = uuid4().hex
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_reply_drafts
+                SET status='sending', claim_token=?, error_text='', updated_at=?
+                WHERE id=? AND telegram_user_id=? AND status='draft'
+                """,
+                (token, utcnow(), int(draft_id), int(telegram_user_id)),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute("SELECT * FROM chat_reply_drafts WHERE id=?", (int(draft_id),)).fetchone()
+            return (dict(row), token) if row else None
+
+    def finish_chat_reply_draft(self, draft_id: int, token: str, *, status: str, error_text: str = "") -> bool:
+        if status not in {"sent", "failed", "uncertain"}:
+            raise ValueError("unsupported reply draft status")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_reply_drafts
+                SET status=?, error_text=?, claim_token='', updated_at=?
+                WHERE id=? AND claim_token=? AND status='sending'
+                """,
+                (status, str(error_text or "")[:2000], utcnow(), int(draft_id), str(token)),
+            )
+            return cursor.rowcount > 0
+
+    def cancel_chat_reply_draft(self, draft_id: int, telegram_user_id: int) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_reply_drafts SET status='cancelled', updated_at=?
+                WHERE id=? AND telegram_user_id=? AND status='draft'
+                """,
+                (utcnow(), int(draft_id), int(telegram_user_id)),
+            )
+            return cursor.rowcount > 0
 
     def add_order_event(
         self,

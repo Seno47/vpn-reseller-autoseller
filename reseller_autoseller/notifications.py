@@ -20,7 +20,7 @@ class TelegramNotifier:
     def enabled(self) -> bool:
         return bool(self.runtime.get_bool("enable_telegram") and self.runtime.get_text("telegram_bot_token"))
 
-    async def send_admins(self, text: str) -> None:
+    async def send_admins(self, text: str, reply_markup: dict[str, Any] | None = None) -> None:
         if not self.enabled():
             return
         token = self.runtime.get_text("telegram_bot_token")
@@ -29,20 +29,30 @@ class TelegramNotifier:
             return
         async with httpx.AsyncClient(timeout=10) as client:
             await asyncio.gather(
-                *[self._send_one(client, token, telegram_id, text) for telegram_id in admin_ids],
+                *[self._send_one(client, token, telegram_id, text, reply_markup) for telegram_id in admin_ids],
                 return_exceptions=True,
             )
 
-    async def _send_one(self, client: httpx.AsyncClient, token: str, telegram_id: int, text: str) -> None:
+    async def _send_one(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        telegram_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         try:
+            payload: dict[str, Any] = {
+                "chat_id": telegram_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
             response = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={
-                    "chat_id": telegram_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
+                json=payload,
             )
             if response.status_code >= 400:
                 log.warning("Cannot send admin notification to %s: %s", telegram_id, response.text)

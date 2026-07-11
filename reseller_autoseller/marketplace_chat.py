@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -212,22 +213,88 @@ class RuntimeGgselClient:
 
 
 class MarketplaceMessenger:
-    def __init__(self, *, digiseller: Any, ggsel: GgselChatClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        digiseller: Any,
+        ggsel: GgselChatClient | None = None,
+        db: Any | None = None,
+        on_message: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.digiseller = digiseller
         self.ggsel = ggsel
+        self.db = db
+        self.on_message = on_message
 
-    async def send_message(self, marketplace: str, external_order_id: str, text: str) -> bool:
+    async def send_message(
+        self,
+        marketplace: str,
+        external_order_id: str,
+        text: str,
+        *,
+        role: str = "bot",
+        author_name: str = "XyraNet",
+        source: str = "automation",
+    ) -> bool:
         try:
             if marketplace in {"plati", "digiseller"}:
-                await self.digiseller.send_order_message(external_order_id, text)
-                return True
-            if marketplace == "ggsel" and self.ggsel:
-                await self.ggsel.send_order_message(external_order_id, text)
-                return True
-            log.warning("No messenger configured for marketplace %s", marketplace)
+                response = await self.digiseller.send_order_message(external_order_id, text)
+            elif marketplace == "ggsel" and self.ggsel:
+                response = await self.ggsel.send_order_message(external_order_id, text)
+            else:
+                log.warning("No messenger configured for marketplace %s", marketplace)
+                return False
         except Exception:
             log.exception("Cannot send marketplace message for %s:%s", marketplace, external_order_id)
-        return False
+            return False
+        try:
+            self._record_sent_message(
+                marketplace=marketplace,
+                external_order_id=external_order_id,
+                text=text,
+                role=role,
+                author_name=author_name,
+                source=source,
+                response=response,
+            )
+        except Exception:
+            # The marketplace already accepted the message. A local history or
+            # Telegram-notification failure must not make callers retry it and
+            # accidentally send the buyer a duplicate.
+            log.exception("Cannot record sent marketplace message for %s:%s", marketplace, external_order_id)
+        return True
+
+    def _record_sent_message(
+        self,
+        *,
+        marketplace: str,
+        external_order_id: str,
+        text: str,
+        role: str,
+        author_name: str,
+        source: str,
+        response: Any,
+    ) -> None:
+        if self.db is None:
+            return
+        response_data = response if isinstance(response, dict) else {}
+        external_message_id = ""
+        for key in ("id", "message_id", "MessageId", "DebateId"):
+            if response_data.get(key) not in (None, ""):
+                external_message_id = str(response_data[key]).strip()
+                break
+        row, created = self.db.add_chat_message(
+            marketplace=marketplace,
+            external_order_id=external_order_id,
+            role=role,
+            author_name=author_name,
+            text=text,
+            external_message_id=external_message_id,
+            source=source,
+            raw_payload=response_data,
+        )
+        if created and self.on_message:
+            self.on_message(row)
 
     async def order_messages(self, marketplace: str, external_order_id: str) -> list[dict[str, Any]]:
         try:

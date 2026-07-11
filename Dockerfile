@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY run.py /app/run.py
 COPY reseller_autoseller /app/reseller_autoseller
+COPY scripts/backfill_digiseller_chat_history.py /app/scripts/backfill_digiseller_chat_history.py
 
 RUN mkdir -p /app/data && chown appuser:appuser /app/data
 

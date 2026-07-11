@@ -15,7 +15,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from reseller_autoseller.chat_ui import chat_actions_reply_markup, format_chat_history, marketplace_label
 from reseller_autoseller.db import Database
+from reseller_autoseller.marketplace_chat import MarketplaceMessenger
 from reseller_autoseller.marketplaces import SUPPORTED_MARKETPLACES
 from reseller_autoseller.runtime_config import RuntimeConfig, SETTING_BY_KEY, SETTING_DEFINITIONS
 from reseller_autoseller.services import (
@@ -33,6 +35,10 @@ from reseller_autoseller.xyra_client import XyraNetClient
 
 
 UNIQUE_CODE_RE = re.compile(r"^[A-Za-z0-9]{16}$")
+QUICK_REPLY_TITLE_LIMIT = 80
+CHAT_REPLY_BODY_LIMIT = 3000
+CHAT_REPLY_RENDERED_BODY_LIMIT = 3300
+QUICK_REPLY_PAGE_SIZE = 8
 
 
 def tr(language: str, ru: str, en: str) -> str:
@@ -56,6 +62,18 @@ class SettingState(StatesGroup):
     waiting_value = State()
 
 
+class ChatReplyState(StatesGroup):
+    waiting_text = State()
+    editing_text = State()
+
+
+class QuickReplyState(StatesGroup):
+    waiting_title = State()
+    waiting_body = State()
+    editing_title = State()
+    editing_body = State()
+
+
 def main_menu(is_owner: bool, language: str = "ru") -> InlineKeyboardMarkup:
     rows = [
         [
@@ -77,6 +95,12 @@ def main_menu(is_owner: bool, language: str = "ru") -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text=tr(language, "📝 Шаблоны", "📝 Templates"), callback_data="menu:templates"),
             InlineKeyboardButton(text=tr(language, "👥 Доступы", "👥 Access"), callback_data="menu:users"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=tr(language, "💬 Быстрые ответы", "💬 Quick replies"),
+                callback_data="menu:quick_replies",
+            )
         ],
     ]
     if is_owner:
@@ -494,18 +518,104 @@ async def answer_or_edit(callback: CallbackQuery, text: str, markup: InlineKeybo
     await callback.answer()
 
 
+def aiogram_markup(payload: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(**dict(button)) for button in row]
+            for row in payload.get("inline_keyboard", [])
+        ]
+    )
+
+
+def telegram_author(event: Message | CallbackQuery) -> str:
+    source = event.from_user
+    if source is None:
+        return "Telegram admin"
+    full_name = str(source.full_name or "").strip()
+    username = str(source.username or "").strip()
+    if full_name and username:
+        return f"{full_name} (@{username})"
+    return full_name or (f"@{username}" if username else str(source.id))
+
+
+def escaped_excerpt(value: Any, limit: int = CHAT_REPLY_RENDERED_BODY_LIMIT) -> str:
+    raw = str(value or "")
+    rendered = escape(raw)
+    if len(rendered) <= limit:
+        return rendered
+    low, high = 0, len(raw)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(escape(raw[:middle])) <= limit - 1:
+            low = middle
+        else:
+            high = middle - 1
+    return escape(raw[:low]).rstrip() + "…"
+
+
+def valid_chat_reply_body(body: str) -> bool:
+    return bool(body) and len(body) <= CHAT_REPLY_BODY_LIMIT and len(escape(body)) <= CHAT_REPLY_RENDERED_BODY_LIMIT
+
+
+def chat_draft_preview(draft: dict[str, Any], language: str = "ru") -> str:
+    body = escaped_excerpt(draft.get("body"))
+    return (
+        f"✍️ <b>{tr(language, 'Проверьте ответ перед отправкой', 'Review the reply before sending')}</b>\n"
+        f"🛒 <b>{escape(marketplace_label(draft.get('marketplace')))}</b> · "
+        f"{tr(language, 'заказ', 'order')} <code>{escape(str(draft.get('external_order_id') or ''))}</code>\n\n"
+        f"<blockquote>{body}</blockquote>\n\n"
+        f"⚠️ {tr(language, 'Сообщение уйдёт покупателю только после подтверждения.', 'The message is sent to the buyer only after confirmation.')}"
+    )
+
+
+def chat_draft_keyboard(draft_id: int, language: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=tr(language, "✅ Отправить", "✅ Send"),
+                    callback_data=f"chat:draft_send:{int(draft_id)}",
+                ),
+                InlineKeyboardButton(
+                    text=tr(language, "✏️ Изменить", "✏️ Edit"),
+                    callback_data=f"chat:draft_edit:{int(draft_id)}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=tr(language, "❌ Отмена", "❌ Cancel"),
+                    callback_data=f"chat:draft_cancel:{int(draft_id)}",
+                )
+            ],
+        ]
+    )
+
+
+def quick_reply_summary(template: dict[str, Any], language: str = "ru") -> str:
+    enabled = bool(int(template.get("enabled") or 0))
+    state = tr(language, "✅ Активна", "✅ Enabled") if enabled else tr(language, "⏸ Отключена", "⏸ Disabled")
+    body = escaped_excerpt(template.get("body"))
+    return (
+        f"⚡ <b>{escape(str(template.get('title') or ''))}</b>\n"
+        f"{state}\n\n"
+        f"<blockquote>{body}</blockquote>"
+    )
+
+
 def build_dispatcher(
     *,
     db: Database,
     xyranet: XyraNetClient,
     digiseller: Any,
     runtime: RuntimeConfig,
+    messenger: MarketplaceMessenger | None = None,
     restart_bot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     check_updates: Callable[[bool], Awaitable[dict[str, Any]]] | None = None,
     start_update: Callable[[], dict[str, Any]] | None = None,
 ) -> Dispatcher:
     router = Router()
     delivery_service = DeliveryService(db=db, xyranet=xyranet, free_reissue_enabled=lambda: runtime.get_bool("free_reissue_enabled"))
+    chat_messenger = messenger or MarketplaceMessenger(digiseller=digiseller, db=db)
 
     def is_admin(telegram_id: int | None) -> bool:
         return bool(telegram_id and runtime.is_bot_admin(telegram_id))
@@ -553,6 +663,868 @@ def build_dispatcher(
             callback,
             f"✨ <b>XyraNet Reseller Autoseller</b>\n{tr(language, 'Выберите действие:', 'Choose an action:')}",
             main_menu(is_owner(uid), language),
+        )
+
+    def chat_anchor(message_id: int) -> dict[str, Any] | None:
+        return db.get_chat_message(int(message_id))
+
+    def chat_action_keyboard(message_id: int, marketplace: str, external_order_id: str) -> InlineKeyboardMarkup:
+        payload = chat_actions_reply_markup(message_id, external_order_id)
+        if marketplace not in {"plati", "digiseller"}:
+            payload = {
+                "inline_keyboard": [
+                    row
+                    for row in payload.get("inline_keyboard", [])
+                    if not any(button.get("url") for button in row)
+                ]
+            }
+        return aiogram_markup(payload)
+
+    def latest_chat_action_keyboard(draft: dict[str, Any], language: str) -> InlineKeyboardMarkup:
+        marketplace = str(draft.get("marketplace") or "digiseller")
+        external_order_id = str(draft.get("external_order_id") or "")
+        rows = db.list_chat_messages(marketplace, external_order_id, limit=1)
+        if not rows:
+            return back_menu(language)
+        return chat_action_keyboard(int(rows[-1]["id"]), marketplace, external_order_id)
+
+    async def show_chat_templates(callback: CallbackQuery, anchor_id: int, page: int, *, replace: bool) -> None:
+        language = runtime_language(runtime)
+        anchor = chat_anchor(anchor_id)
+        if not anchor:
+            await callback.answer(tr(language, "⚠️ Сообщение не найдено", "⚠️ Message not found"), show_alert=True)
+            return
+        templates = db.list_quick_reply_templates(enabled_only=True)
+        total_pages = max(1, (len(templates) + QUICK_REPLY_PAGE_SIZE - 1) // QUICK_REPLY_PAGE_SIZE)
+        selected_page = max(0, min(int(page), total_pages - 1))
+        start = selected_page * QUICK_REPLY_PAGE_SIZE
+        selected = templates[start : start + QUICK_REPLY_PAGE_SIZE]
+        buttons: list[list[InlineKeyboardButton]] = []
+        for template in selected:
+            title = str(template.get("title") or "").strip()
+            label = title if len(title) <= 42 else title[:41].rstrip() + "…"
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"⚡ {label}",
+                        callback_data=f"chat:template:{int(anchor_id)}:{int(template['id'])}",
+                    )
+                ]
+            )
+        navigation: list[InlineKeyboardButton] = []
+        if selected_page > 0:
+            navigation.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"chat:templates:{int(anchor_id)}:{selected_page - 1}",
+                )
+            )
+        if selected_page + 1 < total_pages:
+            navigation.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"chat:templates:{int(anchor_id)}:{selected_page + 1}",
+                )
+            )
+        if navigation:
+            buttons.append(navigation)
+        buttons.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "✍️ Написать вручную", "✍️ Write manually"),
+                        callback_data=f"chat:reply:{int(anchor_id)}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "⚙️ Управление заготовками", "⚙️ Manage quick replies"),
+                        callback_data="menu:quick_replies",
+                    )
+                ],
+            ]
+        )
+        if templates:
+            text = (
+                f"⚡ <b>{tr(language, 'Заготовки ответов', 'Quick replies')}</b>\n"
+                f"🧾 {tr(language, 'Заказ', 'Order')}: "
+                f"<code>{escape(str(anchor.get('external_order_id') or ''))}</code>\n\n"
+                f"{tr(language, 'Выберите текст — перед отправкой его можно будет проверить и изменить.', 'Choose a reply. You can review and edit it before sending.')}"
+            )
+        else:
+            text = (
+                f"⚡ <b>{tr(language, 'Заготовок пока нет', 'No quick replies yet')}</b>\n"
+                f"{tr(language, 'Создайте первую заготовку в разделе управления.', 'Create the first quick reply in the management section.')}"
+            )
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+        if replace and callback.message:
+            await callback.message.edit_text(text, reply_markup=markup)
+        elif callback.message:
+            await callback.message.answer(text, reply_markup=markup)
+        await callback.answer()
+
+    async def show_quick_replies(callback: CallbackQuery, page: int = 0) -> None:
+        language = runtime_language(runtime)
+        rows = db.list_quick_reply_templates()
+        total_pages = max(1, (len(rows) + QUICK_REPLY_PAGE_SIZE - 1) // QUICK_REPLY_PAGE_SIZE)
+        selected_page = max(0, min(int(page), total_pages - 1))
+        start = selected_page * QUICK_REPLY_PAGE_SIZE
+        selected = rows[start : start + QUICK_REPLY_PAGE_SIZE]
+        buttons: list[list[InlineKeyboardButton]] = []
+        lines = [
+            f"💬 <b>{tr(language, 'Быстрые ответы', 'Quick replies')}</b>",
+            tr(
+                language,
+                "Заготовки помогают отвечать покупателям в пару нажатий. Перед отправкой всегда показывается предпросмотр.",
+                "Quick replies make buyer support faster. A preview is always shown before sending.",
+            ),
+        ]
+        for template in selected:
+            enabled = bool(int(template.get("enabled") or 0))
+            icon = "✅" if enabled else "⏸"
+            title = str(template.get("title") or "").strip()
+            lines.append(f"{icon} <b>{escape(title)}</b>")
+            label = title if len(title) <= 38 else title[:37].rstrip() + "…"
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{icon} {label}",
+                        callback_data=f"quick:view:{int(template['id'])}",
+                    )
+                ]
+            )
+        if not selected:
+            lines.append(f"\n{tr(language, 'Пока нет ни одной заготовки.', 'There are no quick replies yet.')}")
+        navigation: list[InlineKeyboardButton] = []
+        if selected_page > 0:
+            navigation.append(InlineKeyboardButton(text="⬅️", callback_data=f"quick:list:{selected_page - 1}"))
+        if selected_page + 1 < total_pages:
+            navigation.append(InlineKeyboardButton(text="➡️", callback_data=f"quick:list:{selected_page + 1}"))
+        if navigation:
+            buttons.append(navigation)
+        buttons.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "➕ Новая заготовка", "➕ New quick reply"),
+                        callback_data="quick:add",
+                    )
+                ],
+                [InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")],
+            ]
+        )
+        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    async def show_quick_reply(callback: CallbackQuery, template_id: int) -> None:
+        language = runtime_language(runtime)
+        template = db.get_quick_reply_template(template_id)
+        if not template:
+            await callback.answer(tr(language, "⚠️ Заготовка не найдена", "⚠️ Quick reply not found"), show_alert=True)
+            return
+        enabled = bool(int(template.get("enabled") or 0))
+        buttons = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "✏️ Название", "✏️ Title"),
+                        callback_data=f"quick:edit_title:{int(template_id)}",
+                    ),
+                    InlineKeyboardButton(
+                        text=tr(language, "📝 Текст", "📝 Text"),
+                        callback_data=f"quick:edit_body:{int(template_id)}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "⏸ Отключить", "⏸ Disable") if enabled else tr(language, "▶️ Включить", "▶️ Enable"),
+                        callback_data=f"quick:toggle:{int(template_id)}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "🗑 Удалить", "🗑 Delete"),
+                        callback_data=f"quick:delete:{int(template_id)}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=tr(language, "⬅️ К списку", "⬅️ Back to list"),
+                        callback_data="menu:quick_replies",
+                    )
+                ],
+            ]
+        )
+        await answer_or_edit(callback, quick_reply_summary(template, language), buttons)
+
+    @router.callback_query(F.data.startswith("chat:more:"))
+    async def chat_more(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        anchor_id = int((callback.data or "").rsplit(":", 1)[-1])
+        anchor = chat_anchor(anchor_id)
+        if not anchor:
+            await callback.answer(tr(language, "⚠️ Сообщение не найдено", "⚠️ Message not found"), show_alert=True)
+            return
+        marketplace = str(anchor.get("marketplace") or "digiseller")
+        external_order_id = str(anchor.get("external_order_id") or "")
+        messages = db.list_chat_messages(marketplace, external_order_id, limit=2000)
+        text = format_chat_history(
+            messages,
+            marketplace=marketplace,
+            external_order_id=external_order_id,
+            language=language,
+        )
+        if callback.message:
+            await callback.message.answer(
+                text,
+                reply_markup=chat_action_keyboard(anchor_id, marketplace, external_order_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("chat:reply:"))
+    async def chat_reply(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        anchor_id = int((callback.data or "").rsplit(":", 1)[-1])
+        anchor = chat_anchor(anchor_id)
+        if not anchor:
+            await callback.answer(tr(language, "⚠️ Сообщение не найдено", "⚠️ Message not found"), show_alert=True)
+            return
+        await state.clear()
+        await state.set_state(ChatReplyState.waiting_text)
+        await state.update_data(
+            chat_anchor_id=anchor_id,
+            marketplace=str(anchor.get("marketplace") or "digiseller"),
+            external_order_id=str(anchor.get("external_order_id") or ""),
+        )
+        if callback.message:
+            await callback.message.answer(
+                f"✍️ <b>{tr(language, 'Ответ покупателю', 'Reply to buyer')}</b>\n"
+                f"🧾 {tr(language, 'Заказ', 'Order')}: "
+                f"<code>{escape(str(anchor.get('external_order_id') or ''))}</code>\n\n"
+                f"{tr(language, 'Отправьте текст ответа следующим сообщением.', 'Send the reply text in your next message.')}",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text=tr(language, "❌ Отмена", "❌ Cancel"),
+                                callback_data="chat:input_cancel",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("chat:templates:"))
+    async def chat_templates(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        parts = (callback.data or "").split(":")
+        anchor_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+        await show_chat_templates(callback, anchor_id, page, replace=len(parts) > 3)
+
+    @router.callback_query(F.data.startswith("chat:template:"))
+    async def chat_template_select(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        parts = (callback.data or "").split(":")
+        anchor = chat_anchor(int(parts[2]))
+        template = db.get_quick_reply_template(int(parts[3]))
+        if not anchor or not template or not bool(int(template.get("enabled") or 0)):
+            await callback.answer(tr(language, "⚠️ Заготовка недоступна", "⚠️ Quick reply is unavailable"), show_alert=True)
+            return
+        body = str(template.get("body") or "").strip()
+        if not valid_chat_reply_body(body):
+            await callback.answer(
+                tr(language, "⚠️ Текст заготовки пустой или слишком длинный", "⚠️ The quick reply is empty or too long"),
+                show_alert=True,
+            )
+            return
+        draft = db.create_chat_reply_draft(
+            marketplace=str(anchor.get("marketplace") or "digiseller"),
+            external_order_id=str(anchor.get("external_order_id") or ""),
+            telegram_user_id=int(uid),
+            author_name=telegram_author(callback),
+            body=body,
+            template_id=int(template["id"]),
+        )
+        await state.clear()
+        await answer_or_edit(callback, chat_draft_preview(draft, language), chat_draft_keyboard(int(draft["id"]), language))
+
+    @router.callback_query(F.data == "chat:input_cancel")
+    async def chat_input_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await state.clear()
+        await answer_or_edit(callback, tr(language, "❌ Ответ отменён.", "❌ Reply cancelled."), back_menu(language))
+
+    @router.message(ChatReplyState.waiting_text)
+    async def chat_reply_text(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        body = str(message.text or "").strip()
+        if not body:
+            await message.answer(tr(language, "⚠️ Ответ не может быть пустым.", "⚠️ The reply cannot be empty."))
+            return
+        if not valid_chat_reply_body(body):
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Слишком длинный ответ: максимум {CHAT_REPLY_BODY_LIMIT} символов.",
+                    f"⚠️ The reply is too long: {CHAT_REPLY_BODY_LIMIT} characters maximum.",
+                )
+            )
+            return
+        data = await state.get_data()
+        try:
+            draft = db.create_chat_reply_draft(
+                marketplace=str(data.get("marketplace") or "digiseller"),
+                external_order_id=str(data.get("external_order_id") or ""),
+                telegram_user_id=int(uid),
+                author_name=telegram_author(message),
+                body=body,
+            )
+        except ValueError as exc:
+            await message.answer(f"⚠️ {escape(str(exc))}")
+            return
+        await state.clear()
+        await message.answer(
+            chat_draft_preview(draft, language),
+            reply_markup=chat_draft_keyboard(int(draft["id"]), language),
+        )
+
+    @router.callback_query(F.data.startswith("chat:draft_edit:"))
+    async def chat_draft_edit(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        draft_id = int((callback.data or "").rsplit(":", 1)[-1])
+        draft = db.get_chat_reply_draft(draft_id)
+        if not draft or int(draft.get("telegram_user_id") or 0) != int(uid) or str(draft.get("status")) != "draft":
+            await callback.answer(tr(language, "⚠️ Черновик уже недоступен", "⚠️ Draft is no longer available"), show_alert=True)
+            return
+        await state.clear()
+        await state.set_state(ChatReplyState.editing_text)
+        await state.update_data(chat_draft_id=draft_id)
+        if callback.message:
+            await callback.message.answer(
+                f"✏️ <b>{tr(language, 'Изменение ответа', 'Edit reply')}</b>\n"
+                f"{tr(language, 'Отправьте новый текст.', 'Send the new text.')}\n\n"
+                f"{tr(language, 'Сейчас', 'Current')}:\n<blockquote>{escaped_excerpt(draft.get('body'))}</blockquote>",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text=tr(language, "❌ Отмена", "❌ Cancel"),
+                                callback_data="chat:input_cancel",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        await callback.answer()
+
+    @router.message(ChatReplyState.editing_text)
+    async def chat_draft_edit_text(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        body = str(message.text or "").strip()
+        if not body:
+            await message.answer(tr(language, "⚠️ Ответ не может быть пустым.", "⚠️ The reply cannot be empty."))
+            return
+        if not valid_chat_reply_body(body):
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Слишком длинный ответ: максимум {CHAT_REPLY_BODY_LIMIT} символов.",
+                    f"⚠️ The reply is too long: {CHAT_REPLY_BODY_LIMIT} characters maximum.",
+                )
+            )
+            return
+        data = await state.get_data()
+        draft = db.update_chat_reply_draft_body(int(data.get("chat_draft_id") or 0), int(uid), body)
+        if not draft:
+            await state.clear()
+            await message.answer(tr(language, "⚠️ Черновик уже недоступен.", "⚠️ Draft is no longer available."))
+            return
+        await state.clear()
+        await message.answer(
+            chat_draft_preview(draft, language),
+            reply_markup=chat_draft_keyboard(int(draft["id"]), language),
+        )
+
+    @router.callback_query(F.data.startswith("chat:draft_cancel:"))
+    async def chat_draft_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        draft_id = int((callback.data or "").rsplit(":", 1)[-1])
+        if not db.cancel_chat_reply_draft(draft_id, int(uid)):
+            await callback.answer(tr(language, "⚠️ Черновик уже обработан", "⚠️ Draft was already processed"), show_alert=True)
+            return
+        await state.clear()
+        await answer_or_edit(callback, tr(language, "❌ Отправка отменена.", "❌ Sending cancelled."), back_menu(language))
+
+    @router.callback_query(F.data.startswith("chat:draft_send:"))
+    async def chat_draft_send(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        draft_id = int((callback.data or "").rsplit(":", 1)[-1])
+        claimed = db.claim_chat_reply_draft(draft_id, int(uid))
+        if not claimed:
+            await callback.answer(
+                tr(language, "⚠️ Этот ответ уже отправляется или обработан", "⚠️ This reply is already sending or processed"),
+                show_alert=True,
+            )
+            return
+        draft, token = claimed
+        await state.clear()
+        await callback.answer(tr(language, "📨 Отправляю…", "📨 Sending…"))
+        error_text = ""
+        try:
+            sent = await chat_messenger.send_message(
+                str(draft.get("marketplace") or "digiseller"),
+                str(draft.get("external_order_id") or ""),
+                str(draft.get("body") or ""),
+                role="admin",
+                author_name=str(draft.get("author_name") or telegram_author(callback)),
+                source="telegram",
+            )
+        except Exception as exc:
+            sent = False
+            error_text = str(exc)
+        if sent:
+            db.finish_chat_reply_draft(draft_id, token, status="sent")
+            text = (
+                f"✅ <b>{tr(language, 'Ответ отправлен покупателю', 'Reply sent to buyer')}</b>\n"
+                f"🧾 {tr(language, 'Заказ', 'Order')}: "
+                f"<code>{escape(str(draft.get('external_order_id') or ''))}</code>\n\n"
+                f"<blockquote>{escaped_excerpt(draft.get('body'))}</blockquote>"
+            )
+        else:
+            db.finish_chat_reply_draft(
+                draft_id,
+                token,
+                status="uncertain",
+                error_text=error_text or "Marketplace API did not confirm delivery",
+            )
+            text = (
+                f"⚠️ <b>{tr(language, 'Статус отправки не подтверждён', 'Sending was not confirmed')}</b>\n"
+                f"{tr(language, 'Автоматический повтор отключён, чтобы покупатель не получил дубликат. Проверьте чат DigiSeller вручную.', 'Automatic retry is disabled to avoid a duplicate. Check the DigiSeller chat manually.')}"
+            )
+        if callback.message:
+            await callback.message.edit_text(text, reply_markup=latest_chat_action_keyboard(draft, language))
+
+    @router.callback_query(F.data == "menu:quick_replies")
+    async def quick_replies(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await show_quick_replies(callback)
+
+    @router.callback_query(F.data.startswith("quick:list:"))
+    async def quick_replies_page(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        page = int((callback.data or "").rsplit(":", 1)[-1])
+        await show_quick_replies(callback, page)
+
+    @router.callback_query(F.data.startswith("quick:view:"))
+    async def quick_reply_view(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await show_quick_reply(callback, int((callback.data or "").rsplit(":", 1)[-1]))
+
+    @router.callback_query(F.data == "quick:add")
+    async def quick_reply_add(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await state.clear()
+        await state.set_state(QuickReplyState.waiting_title)
+        await answer_or_edit(
+            callback,
+            f"➕ <b>{tr(language, 'Новая заготовка', 'New quick reply')}</b>\n"
+            f"{tr(language, 'Отправьте короткое понятное название.', 'Send a short, clear title.')}",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "❌ Отмена", "❌ Cancel"),
+                            callback_data="quick:input_cancel",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+    @router.message(QuickReplyState.waiting_title)
+    async def quick_reply_title(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        title = str(message.text or "").strip()
+        if not title or len(title) > QUICK_REPLY_TITLE_LIMIT:
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Название должно содержать от 1 до {QUICK_REPLY_TITLE_LIMIT} символов.",
+                    f"⚠️ The title must contain 1 to {QUICK_REPLY_TITLE_LIMIT} characters.",
+                )
+            )
+            return
+        await state.update_data(quick_reply_title=title)
+        await state.set_state(QuickReplyState.waiting_body)
+        await message.answer(
+            f"📝 <b>{tr(language, 'Текст заготовки', 'Quick reply text')}</b>\n"
+            f"{tr(language, 'Теперь отправьте сообщение, которое будет предложено для ответа покупателю.', 'Now send the message that will be suggested as the buyer reply.')}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "❌ Отмена", "❌ Cancel"),
+                            callback_data="quick:input_cancel",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+    @router.message(QuickReplyState.waiting_body)
+    async def quick_reply_body(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        body = str(message.text or "").strip()
+        if not valid_chat_reply_body(body):
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Текст должен содержать от 1 до {CHAT_REPLY_BODY_LIMIT} символов.",
+                    f"⚠️ The text must contain 1 to {CHAT_REPLY_BODY_LIMIT} characters.",
+                )
+            )
+            return
+        data = await state.get_data()
+        template = db.create_quick_reply_template(
+            str(data.get("quick_reply_title") or ""),
+            body,
+            created_by=int(uid),
+        )
+        await state.clear()
+        await message.answer(
+            f"✅ <b>{tr(language, 'Заготовка сохранена', 'Quick reply saved')}</b>\n\n"
+            f"{quick_reply_summary(template, language)}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "⚙️ Открыть настройки", "⚙️ Open settings"),
+                            callback_data=f"quick:view:{int(template['id'])}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "⬅️ К списку", "⬅️ Back to list"),
+                            callback_data="menu:quick_replies",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("quick:edit_title:"))
+    async def quick_reply_edit_title(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        template_id = int((callback.data or "").rsplit(":", 1)[-1])
+        template = db.get_quick_reply_template(template_id)
+        if not template:
+            await callback.answer(tr(language, "⚠️ Заготовка не найдена", "⚠️ Quick reply not found"), show_alert=True)
+            return
+        await state.clear()
+        await state.set_state(QuickReplyState.editing_title)
+        await state.update_data(quick_reply_template_id=template_id)
+        await answer_or_edit(
+            callback,
+            f"✏️ <b>{tr(language, 'Новое название', 'New title')}</b>\n"
+            f"{tr(language, 'Сейчас', 'Current')}: <code>{escape(str(template.get('title') or ''))}</code>\n\n"
+            f"{tr(language, 'Отправьте новое название.', 'Send the new title.')}",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "❌ Отмена", "❌ Cancel"),
+                            callback_data="quick:input_cancel",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+    @router.message(QuickReplyState.editing_title)
+    async def quick_reply_edit_title_text(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        title = str(message.text or "").strip()
+        if not title or len(title) > QUICK_REPLY_TITLE_LIMIT:
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Название должно содержать от 1 до {QUICK_REPLY_TITLE_LIMIT} символов.",
+                    f"⚠️ The title must contain 1 to {QUICK_REPLY_TITLE_LIMIT} characters.",
+                )
+            )
+            return
+        data = await state.get_data()
+        template = db.update_quick_reply_template(int(data.get("quick_reply_template_id") or 0), title=title)
+        await state.clear()
+        if not template:
+            await message.answer(tr(language, "⚠️ Заготовка не найдена.", "⚠️ Quick reply not found."))
+            return
+        await message.answer(
+            f"✅ {tr(language, 'Название обновлено.', 'Title updated.')}\n\n{quick_reply_summary(template, language)}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=tr(language, "⚙️ Настройки", "⚙️ Settings"), callback_data=f"quick:view:{int(template['id'])}")]
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("quick:edit_body:"))
+    async def quick_reply_edit_body(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        template_id = int((callback.data or "").rsplit(":", 1)[-1])
+        template = db.get_quick_reply_template(template_id)
+        if not template:
+            await callback.answer(tr(language, "⚠️ Заготовка не найдена", "⚠️ Quick reply not found"), show_alert=True)
+            return
+        await state.clear()
+        await state.set_state(QuickReplyState.editing_body)
+        await state.update_data(quick_reply_template_id=template_id)
+        await answer_or_edit(
+            callback,
+            f"📝 <b>{tr(language, 'Новый текст', 'New text')}</b>\n"
+            f"{tr(language, 'Сейчас', 'Current')}:\n<blockquote>{escaped_excerpt(template.get('body'))}</blockquote>\n\n"
+            f"{tr(language, 'Отправьте новый текст заготовки.', 'Send the new quick reply text.')}",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "❌ Отмена", "❌ Cancel"),
+                            callback_data="quick:input_cancel",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+    @router.message(QuickReplyState.editing_body)
+    async def quick_reply_edit_body_text(message: Message, state: FSMContext) -> None:
+        uid = user_id(message)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await state.clear()
+            await deny_message(message)
+            return
+        body = str(message.text or "").strip()
+        if not valid_chat_reply_body(body):
+            await message.answer(
+                tr(
+                    language,
+                    f"⚠️ Текст должен содержать от 1 до {CHAT_REPLY_BODY_LIMIT} символов.",
+                    f"⚠️ The text must contain 1 to {CHAT_REPLY_BODY_LIMIT} characters.",
+                )
+            )
+            return
+        data = await state.get_data()
+        template = db.update_quick_reply_template(int(data.get("quick_reply_template_id") or 0), body=body)
+        await state.clear()
+        if not template:
+            await message.answer(tr(language, "⚠️ Заготовка не найдена.", "⚠️ Quick reply not found."))
+            return
+        await message.answer(
+            f"✅ {tr(language, 'Текст обновлён.', 'Text updated.')}\n\n{quick_reply_summary(template, language)}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=tr(language, "⚙️ Настройки", "⚙️ Settings"), callback_data=f"quick:view:{int(template['id'])}")]
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("quick:toggle:"))
+    async def quick_reply_toggle(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        template_id = int((callback.data or "").rsplit(":", 1)[-1])
+        current = db.get_quick_reply_template(template_id)
+        if not current:
+            await callback.answer(tr(language, "⚠️ Заготовка не найдена", "⚠️ Quick reply not found"), show_alert=True)
+            return
+        db.update_quick_reply_template(template_id, enabled=not bool(int(current.get("enabled") or 0)))
+        await callback.answer(tr(language, "✅ Статус изменён", "✅ Status changed"))
+        if callback.message:
+            updated = db.get_quick_reply_template(template_id)
+            enabled = bool(int((updated or {}).get("enabled") or 0))
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "✏️ Название", "✏️ Title"),
+                            callback_data=f"quick:edit_title:{template_id}",
+                        ),
+                        InlineKeyboardButton(
+                            text=tr(language, "📝 Текст", "📝 Text"),
+                            callback_data=f"quick:edit_body:{template_id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "⏸ Отключить", "⏸ Disable") if enabled else tr(language, "▶️ Включить", "▶️ Enable"),
+                            callback_data=f"quick:toggle:{template_id}",
+                        )
+                    ],
+                    [InlineKeyboardButton(text=tr(language, "🗑 Удалить", "🗑 Delete"), callback_data=f"quick:delete:{template_id}")],
+                    [InlineKeyboardButton(text=tr(language, "⬅️ К списку", "⬅️ Back to list"), callback_data="menu:quick_replies")],
+                ]
+            )
+            await callback.message.edit_text(quick_reply_summary(updated or current, language), reply_markup=markup)
+
+    @router.callback_query(F.data.startswith("quick:delete:"))
+    async def quick_reply_delete(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        template_id = int((callback.data or "").rsplit(":", 1)[-1])
+        template = db.get_quick_reply_template(template_id)
+        if not template:
+            await callback.answer(tr(language, "⚠️ Заготовка не найдена", "⚠️ Quick reply not found"), show_alert=True)
+            return
+        await answer_or_edit(
+            callback,
+            f"🗑 <b>{tr(language, 'Удалить заготовку?', 'Delete quick reply?')}</b>\n\n"
+            f"<code>{escape(str(template.get('title') or ''))}</code>\n\n"
+            f"{tr(language, 'Это действие нельзя отменить.', 'This action cannot be undone.')}",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "🗑 Да, удалить", "🗑 Yes, delete"),
+                            callback_data=f"quick:delete_confirm:{template_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=tr(language, "⬅️ Отмена", "⬅️ Cancel"),
+                            callback_data=f"quick:view:{template_id}",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("quick:delete_confirm:"))
+    async def quick_reply_delete_confirm(callback: CallbackQuery) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        template_id = int((callback.data or "").rsplit(":", 1)[-1])
+        try:
+            deleted = db.delete_quick_reply_template(template_id)
+        except Exception as exc:
+            await callback.answer(f"⚠️ {escape(str(exc))}", show_alert=True)
+            return
+        if not deleted:
+            await callback.answer(tr(language, "⚠️ Заготовка уже удалена", "⚠️ Quick reply was already deleted"), show_alert=True)
+            return
+        await answer_or_edit(
+            callback,
+            tr(language, "🗑 Заготовка удалена.", "🗑 Quick reply deleted."),
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=tr(language, "⬅️ К списку", "⬅️ Back to list"), callback_data="menu:quick_replies")]
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data == "quick:input_cancel")
+    async def quick_reply_input_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        uid = user_id(callback)
+        language = runtime_language(runtime)
+        if not is_admin(uid):
+            await deny_callback(callback)
+            return
+        await state.clear()
+        await answer_or_edit(
+            callback,
+            tr(language, "❌ Изменения отменены.", "❌ Changes cancelled."),
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=tr(language, "⬅️ К списку", "⬅️ Back to list"), callback_data="menu:quick_replies")]
+                ]
+            ),
         )
 
     @router.callback_query(F.data == "menu:status")
@@ -1208,6 +2180,7 @@ async def run_bot(
     xyranet: XyraNetClient,
     digiseller: Any,
     runtime: RuntimeConfig,
+    messenger: MarketplaceMessenger | None = None,
     restart_bot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     check_updates: Callable[[bool], Awaitable[dict[str, Any]]] | None = None,
     start_update: Callable[[], dict[str, Any]] | None = None,
@@ -1218,6 +2191,7 @@ async def run_bot(
         xyranet=xyranet,
         digiseller=digiseller,
         runtime=runtime,
+        messenger=messenger,
         restart_bot=restart_bot,
         check_updates=check_updates,
         start_update=start_update,

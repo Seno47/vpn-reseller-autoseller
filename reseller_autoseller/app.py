@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from reseller_autoseller import __version__
 from reseller_autoseller.config import get_settings
+from reseller_autoseller.chat_ui import chat_actions_reply_markup, format_chat_notification
 from reseller_autoseller.db import Database
 from reseller_autoseller.digiseller_client import (
     DigisellerApiError,
@@ -155,6 +156,7 @@ def create_app() -> FastAPI:
     messenger = MarketplaceMessenger(
         digiseller=digiseller,
         ggsel=ggsel,
+        db=db,
     )
     delivery_service = DeliveryService(
         db=db,
@@ -169,6 +171,8 @@ def create_app() -> FastAPI:
     bot_lock = asyncio.Lock()
     bot_last_error = ""
     recent_notifications: dict[str, float] = {}
+    recent_digiseller_blind_syncs: dict[str, float] = {}
+    digiseller_chat_sync_locks: dict[str, asyncio.Lock] = {}
     poll_error_notifications: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
     admin_sessions: dict[str, float] = {}
@@ -177,7 +181,12 @@ def create_app() -> FastAPI:
     if not runtime.get_text("digiseller_notification_secret"):
         db.set_setting("digiseller_notification_secret", secrets.token_urlsafe(32))
 
-    def notify_admins(text: str, kind: str = "errors") -> None:
+    def notify_admins(
+        text: str,
+        kind: str = "errors",
+        reply_markup: dict[str, Any] | None = None,
+        dedupe_key: str = "",
+    ) -> None:
         setting_key = f"notify_{kind}"
         if setting_key in {
             "notify_new_purchases",
@@ -189,11 +198,11 @@ def create_app() -> FastAPI:
             return
         now = time.monotonic()
         dedupe_window = 60 if kind == "chat_messages" else 20
-        dedupe_key = f"{kind}:{text}"
-        last_sent = recent_notifications.get(dedupe_key, 0)
+        notification_key = f"{kind}:{dedupe_key or text}"
+        last_sent = recent_notifications.get(notification_key, 0)
         if now - last_sent < dedupe_window:
             return
-        recent_notifications[dedupe_key] = now
+        recent_notifications[notification_key] = now
         if len(recent_notifications) > 300:
             cutoff = now - 3600
             for key, timestamp in list(recent_notifications.items()):
@@ -201,12 +210,22 @@ def create_app() -> FastAPI:
                     recent_notifications.pop(key, None)
 
         async def runner() -> None:
-            await notifier.send_admins(text)
+            await notifier.send_admins(text, reply_markup=reply_markup)
 
         try:
             asyncio.create_task(runner())
         except RuntimeError:
             log.exception("Cannot schedule Telegram admin notification")
+
+    def notify_chat_record(row: dict[str, Any]) -> None:
+        notify_admins(
+            format_chat_notification(row, runtime.language()),
+            kind="chat_messages",
+            reply_markup=chat_actions_reply_markup(int(row["id"]), row.get("external_order_id")),
+            dedupe_key=f"chat-message:{row['id']}",
+        )
+
+    messenger.on_message = notify_chat_record
 
     def tr(ru: str, en: str) -> str:
         return en if runtime.language() == "en" else ru
@@ -328,12 +347,15 @@ def create_app() -> FastAPI:
     def message_is_from_buyer(message: dict[str, Any]) -> bool:
         seller_markers = ("seller", "is_seller", "from_seller", "seller_message")
         buyer_markers = ("buyer", "is_buyer", "from_buyer", "customer", "is_customer")
+        lowered = {str(key).lower(): value for key, value in message.items()}
         for key in seller_markers:
-            if key in message and str(message.get(key)).strip().lower() in {"1", "true", "yes"}:
+            if key in lowered and str(lowered.get(key)).strip().lower() in {"1", "true", "yes"}:
                 return False
         for key in buyer_markers:
-            if key in message and str(message.get(key)).strip().lower() in {"1", "true", "yes"}:
+            if key in lowered and str(lowered.get(key)).strip().lower() in {"1", "true", "yes"}:
                 return True
+        if any(key in lowered for key in (*seller_markers, *buyer_markers)):
+            return False
         return True
 
     def message_action_signature(text: str) -> str:
@@ -816,6 +838,74 @@ def create_app() -> FastAPI:
         )
         return True
 
+    def message_role(message: dict[str, Any]) -> str:
+        seller_markers = ("seller", "is_seller", "from_seller", "seller_message")
+        buyer_markers = ("buyer", "is_buyer", "from_buyer", "customer", "is_customer")
+        lowered = {str(key).lower(): value for key, value in message.items()}
+        for key in seller_markers:
+            if key in lowered and str(lowered.get(key)).strip().lower() in {"1", "true", "yes"}:
+                return "seller"
+        for key in buyer_markers:
+            if key in lowered and str(lowered.get(key)).strip().lower() in {"1", "true", "yes"}:
+                return "buyer"
+        if any(key in lowered for key in (*seller_markers, *buyer_markers)):
+            return "system"
+        return "buyer"
+
+    def save_remote_chat_message(
+        *,
+        marketplace: str,
+        external_order_id: str,
+        payload: dict[str, Any],
+        text: str = "",
+        remote_id: str = "",
+        remote_date: str = "",
+        source: str,
+    ) -> tuple[dict[str, Any], bool]:
+        selected_text = str(text or message_text(payload)).strip()
+        selected_id = str(remote_id or message_id(payload)).strip()
+        selected_date = str(
+            remote_date
+            or payload_get(payload, "date_written", "MessageDate", "message_date", "date")
+            or ""
+        ).strip()
+        selected_role = message_role(payload)
+        recent_outgoing = db.find_recent_chat_message_by_text(
+            marketplace,
+            external_order_id,
+            selected_text,
+        )
+        if recent_outgoing and selected_role != "buyer":
+            return recent_outgoing, False
+        if selected_id:
+            selected_key = f"remote:{selected_id}"
+        else:
+            fingerprint = "\x1f".join(
+                (source, marketplace, external_order_id, selected_role, selected_date, selected_text)
+            )
+            selected_key = "event:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        row, created = db.add_chat_message(
+            marketplace=marketplace,
+            external_order_id=external_order_id,
+            role=selected_role,
+            text=selected_text,
+            external_message_id=selected_id,
+            message_key=selected_key,
+            source=source,
+            message_date=selected_date,
+            is_file=payload_get(payload, "is_file", "IsFile").lower() in {"1", "true", "yes"},
+            file_name=payload_get(payload, "filename", "FileName"),
+            file_url=payload_get(payload, "url", "FileUrl", "file_url"),
+            raw_payload={
+                key: payload.get(key)
+                for key in ("buyer", "seller", "deleted", "is_file", "filename", "url")
+                if key in payload
+            },
+        )
+        if created:
+            notify_chat_record(row)
+        return row, created
+
     async def process_unique_code_message(invoice_id: str, code: str) -> bool:
         db.add_order_event(
             marketplace="plati",
@@ -1165,7 +1255,7 @@ def create_app() -> FastAPI:
             )
             return True
 
-    async def process_digiseller_chat_messages(invoice_id: str) -> bool:
+    async def process_digiseller_chat_messages(invoice_id: str, *, raise_on_read_error: bool = False) -> bool:
         if digiseller_api_paused():
             return False
         last_seen = db.get_chat_cursor("plati", invoice_id)
@@ -1178,6 +1268,8 @@ def create_app() -> FastAPI:
             )
         except Exception as exc:
             log_poll_error("digiseller_messages", f"Cannot read Digiseller messages for {invoice_id}", exc)
+            if raise_on_read_error:
+                raise
             return False
         if not messages and last_seen:
             try:
@@ -1188,10 +1280,24 @@ def create_app() -> FastAPI:
         cursor_to_save = last_seen
         handled = False
         handled_signature = ""
+        # Persist and notify every returned message first. Business processing
+        # may deliberately stop at one actionable buyer command, but that must
+        # never truncate the locally saved conversation.
+        for message in messages:
+            text = message_text(message)
+            if text or message.get("is_file"):
+                save_remote_chat_message(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    payload=message,
+                    text=text,
+                    remote_id=message_id(message),
+                    source="digiseller_api",
+                )
         for message in messages:
             current_id = message_id(message)
-            from_buyer = message_is_from_buyer(message)
-            text = message_text(message) if from_buyer else ""
+            role = message_role(message)
+            text = message_text(message)
             signature = message_action_signature(text) if text else ""
             if handled:
                 if signature and signature == handled_signature:
@@ -1201,10 +1307,8 @@ def create_app() -> FastAPI:
                 break
             if current_id:
                 cursor_to_save = current_id
-            if not from_buyer:
+            if role != "buyer":
                 continue
-            if text and current_id != last_seen:
-                notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
             for code in unique_codes_from_text(text):
                 handled = await process_unique_code_message(invoice_id, code)
                 if handled:
@@ -1217,6 +1321,10 @@ def create_app() -> FastAPI:
                 handled_signature = signature
                 continue
             handled = await process_free_reissue_command(invoice_id, text, current_id)
+            if handled:
+                handled_signature = signature
+                continue
+            handled = await process_pending_operation_message("plati", invoice_id, text)
             if handled:
                 handled_signature = signature
                 continue
@@ -1233,13 +1341,9 @@ def create_app() -> FastAPI:
         if (
             not digiseller_polling_configured()
             or digiseller_api_paused()
-            or (
-                runtime.get_bool("digiseller_message_notifications_enabled")
-                and not runtime.get_bool("digiseller_polling_fallback_enabled")
-            )
+            or not runtime.get_bool("digiseller_polling_fallback_enabled")
         ):
             return
-        seen_invoice_ids: set[str] = set()
         try:
             chats = await digiseller.order_chats(filter_new=True, rows=100)
         except Exception as exc:
@@ -1249,22 +1353,13 @@ def create_app() -> FastAPI:
             invoice_id = chat_invoice_id(chat)
             if not invoice_id:
                 continue
-            seen_invoice_ids.add(invoice_id)
-            await process_digiseller_chat_messages(invoice_id)
-        for cursor in db.list_chat_cursors("plati", limit=200):
-            invoice_id = str(cursor.get("external_order_id") or "").strip()
-            if not invoice_id or invoice_id in seen_invoice_ids:
-                continue
             await process_digiseller_chat_messages(invoice_id)
 
     async def poll_digiseller_unclaimed_unique_code_sales() -> None:
         if (
             not digiseller_unique_code_requests_enabled()
             or digiseller_api_paused()
-            or (
-                runtime.get_bool("digiseller_sale_notifications_enabled")
-                and not runtime.get_bool("digiseller_polling_fallback_enabled")
-            )
+            or not runtime.get_bool("digiseller_polling_fallback_enabled")
         ):
             return
         now = datetime.now(DIGISELLER_NAIVE_DATETIME_ZONE)
@@ -1491,6 +1586,7 @@ def create_app() -> FastAPI:
             db.set_chat_cursor("ggsel", cursor_key, cursor_candidate)
 
     async def poll_marketplace_chats() -> None:
+        last_digiseller_fallback_poll = 0.0
         last_unclaimed_unique_code_poll = 0.0
         while True:
             try:
@@ -1518,16 +1614,21 @@ def create_app() -> FastAPI:
                             exc,
                         )
                 await process_digiseller_sale_notification_reminders()
-                await poll_digiseller_unique_code_chats()
                 now_monotonic = time.monotonic()
-                if now_monotonic - last_unclaimed_unique_code_poll >= 60:
+                if now_monotonic - last_digiseller_fallback_poll >= 300:
+                    last_digiseller_fallback_poll = now_monotonic
+                    await poll_digiseller_unique_code_chats()
+                if now_monotonic - last_unclaimed_unique_code_poll >= 600:
                     last_unclaimed_unique_code_poll = now_monotonic
                     await poll_digiseller_unclaimed_unique_code_sales()
                 await poll_ggsel_sales()
                 for operation in db.list_pending_operations():
                     if not marketplace_messages_configured(str(operation["marketplace"])):
                         continue
-                    if str(operation["marketplace"]) in {"plati", "digiseller"} and digiseller_api_paused():
+                    # DigiSeller pending replies are handled by the message webhook.
+                    # The optional fallback reads only the unread-chat list above,
+                    # never every pending chat on every 20-second loop.
+                    if str(operation["marketplace"]) in {"plati", "digiseller"}:
                         continue
                     messages = await messenger.order_messages(
                         str(operation["marketplace"]),
@@ -1721,6 +1822,7 @@ def create_app() -> FastAPI:
                         xyranet=xyranet,
                         digiseller=digiseller,
                         runtime=runtime,
+                        messenger=messenger,
                         restart_bot=restart_telegram_bot,
                         check_updates=lambda force=True: update_manager.check(force=force),
                         start_update=update_manager.start_update,
@@ -1982,19 +2084,71 @@ def create_app() -> FastAPI:
         text = payload_get(payload, "Message", "MessageText", "message", "text")
         message_id = payload_get(payload, "DebateId", "MessageId", "ID_D", "ID_M", "message_id", "id")
         message_date = payload_get(payload, "MessageDate", "message_date", "date")
-        if not invoice_id or not text:
-            raise HTTPException(status_code=400, detail="Digiseller message notification has no invoice or message text")
-        last_seen = db.get_chat_cursor("plati", invoice_id)
-        if message_id and last_seen == message_id:
-            return {"status": "ignored", "reason": "duplicate message notification"}
-        db.add_order_event(
+        # DigiSeller sends administration/service notifications to the same URL.
+        # They do not belong to a buyer invoice, so acknowledge them instead of
+        # returning 400 and triggering repeated delivery warnings in the cabinet.
+        if not invoice_id:
+            return {"status": "ignored", "reason": "notification has no buyer invoice"}
+
+        # Some notification variants contain only the invoice. Resolve that one
+        # chat once; normal UI actions always read the local history and never
+        # call DigiSeller.
+        if not text:
+            sync_lock = digiseller_chat_sync_locks.setdefault(invoice_id, asyncio.Lock())
+            async with sync_lock:
+                now_monotonic = time.monotonic()
+                if now_monotonic - recent_digiseller_blind_syncs.get(invoice_id, 0.0) < 10:
+                    return {"status": "ignored", "reason": "chat was synchronized recently"}
+                try:
+                    handled = await process_digiseller_chat_messages(invoice_id, raise_on_read_error=True)
+                except Exception as exc:
+                    raise HTTPException(status_code=503, detail="Cannot synchronize Digiseller buyer chat") from exc
+                recent_digiseller_blind_syncs[invoice_id] = time.monotonic()
+                if len(recent_digiseller_blind_syncs) > 500:
+                    cutoff = time.monotonic() - 300
+                    for key, synced_at in list(recent_digiseller_blind_syncs.items()):
+                        if synced_at < cutoff:
+                            recent_digiseller_blind_syncs.pop(key, None)
+                            old_lock = digiseller_chat_sync_locks.get(key)
+                            if old_lock is not None and not old_lock.locked():
+                                digiseller_chat_sync_locks.pop(key, None)
+            return {"status": "ok", "action": "chat_synced", "handled": handled}
+
+        row, created = save_remote_chat_message(
             marketplace="plati",
             external_order_id=invoice_id,
-            event_type="digiseller_message_notification_received",
-            status="info",
-            payload={"message_id": message_id, "message_date": message_date, "text_preview": compact_text(text, 300)},
+            payload=payload,
+            text=text,
+            remote_id=message_id,
+            remote_date=message_date,
+            source="digiseller_webhook",
         )
-        notify_admins(chat_message_notification("plati", invoice_id, text), kind="chat_messages")
+        last_seen = db.get_chat_cursor("plati", invoice_id)
+        if not created and message_id and last_seen == message_id:
+            return {
+                "status": "ignored",
+                "reason": "duplicate message notification",
+                "message_id": row.get("id"),
+            }
+        if created:
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id=invoice_id,
+                event_type="digiseller_message_notification_received",
+                status="info",
+                payload={"message_id": message_id, "message_date": message_date, "text_preview": compact_text(text, 300)},
+            )
+        role = str(row.get("role") or "system")
+        if role != "buyer":
+            if message_id:
+                db.set_chat_cursor("plati", invoice_id, message_id)
+            return {
+                "status": "ok" if created else "ignored",
+                "handled": False,
+                "action": "stored" if created else "duplicate",
+                "role": role,
+            }
+
         handled = False
         handled_action = ""
         for code in unique_codes_from_text(text):
