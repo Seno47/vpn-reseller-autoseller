@@ -28,6 +28,8 @@ DEFAULT_CREATE_TEMPLATE = """✅ VPN-доступ готов
 Сохраните ID заказа. Он понадобится для продления, докупки LTE-трафика и расширения лимита IP.
 Не публикуйте ссылку подписки в открытом доступе."""
 
+DEFAULT_REVIEW_REQUEST = """Если всё работает как нужно, будем благодарны за положительный отзыв о покупке. Это помогает нам развивать сервис. Спасибо!"""
+
 DEFAULT_ACTION_TEMPLATES = {
     "create": DEFAULT_CREATE_TEMPLATE,
     "renew": """✅ Подписка продлена.
@@ -141,7 +143,10 @@ for _action in ("renew", "reissue", "traffic", "ip_limit"):
     DEFAULT_ACTION_TEMPLATES.setdefault(f"{_action}_error", DEFAULT_ACTION_TEMPLATES["operation_error"])
     DEFAULT_ACTION_TEMPLATES.setdefault(f"{_action}_command_mismatch", DEFAULT_ACTION_TEMPLATES["command_mismatch"])
 
-DEFAULT_CREATE_TEMPLATE = DEFAULT_CREATE_TEMPLATE + "\n\n{COMMAND_HELP}"
+for _action in ("renew", "reissue", "traffic", "ip_limit"):
+    DEFAULT_ACTION_TEMPLATES[_action] += "\n\n" + DEFAULT_REVIEW_REQUEST
+
+DEFAULT_CREATE_TEMPLATE = DEFAULT_CREATE_TEMPLATE + "\n\n{COMMAND_HELP}\n\n" + DEFAULT_REVIEW_REQUEST
 DEFAULT_ACTION_TEMPLATES["create"] = DEFAULT_CREATE_TEMPLATE
 
 DEFAULT_DELIVERY_TEMPLATE = DEFAULT_CREATE_TEMPLATE

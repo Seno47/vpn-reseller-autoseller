@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from reseller_autoseller.db import Database
 from reseller_autoseller.marketplaces import SaleEvent
 from reseller_autoseller.services import (
+    DEFAULT_ACTION_TEMPLATES,
     TEMPLATE_GROUPS,
     DeliveryInProgressError,
     MarketplaceMessageError,
@@ -104,6 +105,13 @@ class SlowXyraClient(FakeXyraClient):
 
 
 class DeliveryServiceTests(unittest.TestCase):
+    def test_successful_sale_templates_request_a_positive_review(self) -> None:
+        for action in ("create", "renew", "reissue", "traffic", "ip_limit"):
+            self.assertIn("положительный отзыв", DEFAULT_ACTION_TEMPLATES[action])
+
+        self.assertNotIn("положительный отзыв", DEFAULT_ACTION_TEMPLATES["request_unique_code"])
+        self.assertNotIn("положительный отзыв", DEFAULT_ACTION_TEMPLATES["status"])
+
     def test_sale_quantity_reads_digiseller_count(self) -> None:
         self.assertEqual(sale_quantity({"cnt_goods": "10"}), 10)
         self.assertEqual(sale_quantity({"order": {"quantity": "2.2"}}), 3)
