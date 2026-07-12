@@ -5,47 +5,65 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
   <title>XyraNet Reseller</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260710-audit-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260712-soft-ui-1">
 </head>
 <body>
-  <section class="login-screen" id="loginScreen">
+  <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
     <form class="login-box" id="loginForm">
       <div>
-        <h1>XyraNet Reseller</h1>
+        <h1 id="loginTitle">XyraNet Reseller</h1>
         <p>Вход в админ-панель автопродаж</p>
       </div>
       <label>Логин<input name="username" autocomplete="username" required></label>
       <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">Войти</button>
-      <p class="login-error" id="loginError"></p>
+      <p class="login-error" id="loginError" role="alert" aria-live="polite"></p>
     </form>
   </section>
+  <a class="skip-link" href="#adminContent">К основному содержанию</a>
 
-  <main class="shell">
+  <main class="shell" id="adminContent" tabindex="-1">
     <section class="topbar">
       <div>
         <h1>XyraNet Reseller</h1>
         <p>Polling-выдача VPN-доступов через Wholesale API</p>
       </div>
-      <div class="topbar-actions">
-        <button id="refreshButton" class="secondary" type="button">Обновить</button>
-        <button id="logoutButton" type="button">Выйти</button>
+      <div class="topbar-controls">
+        <div class="topbar-actions">
+          <button id="refreshButton" class="secondary" type="button">Обновить статус</button>
+          <button id="logoutButton" type="button">Выйти</button>
+        </div>
+        <section class="top-update-card" aria-labelledby="quickUpdateTitle">
+          <div class="top-update-head">
+            <div>
+              <h2 id="quickUpdateTitle">Версия программы</h2>
+              <p class="update-notice" id="updateNotice" role="status" aria-live="polite" aria-atomic="true">Сведения о версии загружаются...</p>
+            </div>
+            <div class="update-actions">
+              <button class="secondary" id="checkUpdateButton" type="button">Проверить обновления</button>
+              <button id="startUpdateButton" type="button" disabled>Обновить версию</button>
+            </div>
+          </div>
+          <div class="update-grid" id="updateStatus" aria-describedby="updateNotice" aria-busy="true">
+            <p class="update-placeholder">Сведения о версии загружаются...</p>
+          </div>
+        </section>
       </div>
     </section>
 
-    <section class="metrics" id="metrics"></section>
+    <section class="metrics" id="metrics" aria-label="Ключевые показатели"></section>
 
-    <nav class="section-tabs" aria-label="Разделы панели">
-      <button class="active" data-section-tab="mapping" type="button">Маппинг</button>
-      <button data-section-tab="templates" type="button">Шаблоны</button>
-      <button data-section-tab="variables" type="button">Переменные</button>
-      <button data-section-tab="statistics" type="button">Статистика</button>
-      <button data-section-tab="diagnostics" type="button">Диагностика</button>
-      <button data-section-tab="settings" type="button">Настройки</button>
-      <button data-section-tab="sales" type="button">Продажи</button>
+    <nav class="section-tabs" aria-label="Разделы панели" role="tablist">
+      <button class="active" id="tab-mapping" data-section-tab="mapping" type="button" role="tab" aria-controls="section-mapping" aria-selected="true">Маппинг</button>
+      <button id="tab-templates" data-section-tab="templates" type="button" role="tab" aria-controls="section-templates" aria-selected="false" tabindex="-1">Шаблоны</button>
+      <button id="tab-variables" data-section-tab="variables" type="button" role="tab" aria-controls="section-variables" aria-selected="false" tabindex="-1">Переменные</button>
+      <button id="tab-statistics" data-section-tab="statistics" type="button" role="tab" aria-controls="section-statistics" aria-selected="false" tabindex="-1">Статистика</button>
+      <button id="tab-diagnostics" data-section-tab="diagnostics" type="button" role="tab" aria-controls="section-diagnostics" aria-selected="false" tabindex="-1">Диагностика</button>
+      <button id="tab-settings" data-section-tab="settings" type="button" role="tab" aria-controls="section-settings" aria-selected="false" tabindex="-1">Настройки</button>
+      <button id="tab-sales" data-section-tab="sales" type="button" role="tab" aria-controls="section-sales" aria-selected="false" tabindex="-1">Продажи</button>
     </nav>
 
-    <section class="app-section active" data-section="mapping">
+    <section class="app-section active" id="section-mapping" data-section="mapping" role="tabpanel" aria-labelledby="tab-mapping">
     <section class="panel">
       <div class="panel-head">
         <h2>Новый / редактируемый маппинг</h2>
@@ -129,7 +147,7 @@
     </section>
     </section>
 
-    <section class="app-section" data-section="templates">
+    <section class="app-section" id="section-templates" data-section="templates" role="tabpanel" aria-labelledby="tab-templates">
       <section class="panel">
         <div class="panel-head">
           <h2>Шаблоны выдачи</h2>
@@ -162,7 +180,7 @@
       </section>
     </section>
 
-    <section class="app-section" data-section="variables">
+    <section class="app-section" id="section-variables" data-section="variables" role="tabpanel" aria-labelledby="tab-variables">
       <section class="panel">
         <div class="panel-head">
           <h2>Составные переменные</h2>
@@ -207,7 +225,7 @@
       </section>
     </section>
 
-    <section class="app-section" data-section="settings">
+    <section class="app-section" id="section-settings" data-section="settings" role="tabpanel" aria-labelledby="tab-settings">
     <section class="two-column">
       <section class="panel">
         <div class="panel-head">
@@ -240,7 +258,7 @@
     </section>
     </section>
 
-    <section class="app-section" data-section="statistics">
+    <section class="app-section" id="section-statistics" data-section="statistics" role="tabpanel" aria-labelledby="tab-statistics">
       <section class="panel">
         <div class="panel-head">
           <h2>Статистика</h2>
@@ -299,7 +317,7 @@
       </section>
     </section>
 
-    <section class="app-section" data-section="sales">
+    <section class="app-section" id="section-sales" data-section="sales" role="tabpanel" aria-labelledby="tab-sales">
     <section class="panel">
       <div class="panel-head">
         <h2>Последние продажи</h2>
@@ -313,19 +331,7 @@
     </section>
     </section>
 
-    <section class="app-section" data-section="diagnostics">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Обновления</h2>
-          <div class="panel-actions">
-            <button class="secondary" id="checkUpdateButton" type="button">Проверить обновление</button>
-            <button id="startUpdateButton" type="button" disabled>Обновить</button>
-          </div>
-        </div>
-        <div class="update-grid" id="updateStatus"></div>
-        <p class="notice" id="updateNotice"></p>
-      </section>
-
+    <section class="app-section" id="section-diagnostics" data-section="diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics">
       <section class="panel">
         <div class="panel-head">
           <h2>Проверки и бэкап</h2>
@@ -388,6 +394,6 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=20260710-audit-1"></script>
+  <script src="/static/app.js?v=20260712-soft-ui-1"></script>
 </body>
 </html>

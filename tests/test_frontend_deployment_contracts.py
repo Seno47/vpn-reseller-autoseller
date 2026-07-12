@@ -194,6 +194,69 @@ class FrontendDeploymentContractTests(unittest.TestCase):
         self.assertIn('t("Не удалось сохранить настройки", "Could not save settings")', javascript)
         self.assertIn('typeof payload?.detail === "string"', javascript)
 
+    def test_update_controls_are_visible_once_at_the_top_of_the_panel(self) -> None:
+        html = self.read("reseller_autoseller/static/index.html")
+        javascript = self.read("reseller_autoseller/static/app.js")
+        stylesheet = self.read("reseller_autoseller/static/styles.css")
+        topbar = html[html.index('<section class="topbar">') : html.index('<section class="metrics"')]
+        diagnostics = html[html.index('data-section="diagnostics"') :]
+
+        for element_id in ("updateStatus", "updateNotice", "checkUpdateButton", "startUpdateButton"):
+            self.assertEqual(html.count(f'id="{element_id}"'), 1)
+            self.assertIn(f'id="{element_id}"', topbar)
+            self.assertNotIn(f'id="{element_id}"', diagnostics)
+
+        self.assertIn('id="refreshButton" class="secondary" type="button">Обновить статус</button>', topbar)
+        self.assertIn('id="checkUpdateButton" type="button">Проверить обновления</button>', topbar)
+        self.assertIn('id="startUpdateButton" type="button" disabled>Обновить версию</button>', topbar)
+        self.assertIn('role="status" aria-live="polite" aria-atomic="true"', topbar)
+        self.assertIn('id="updateStatus" aria-describedby="updateNotice" aria-busy="true"', topbar)
+        self.assertIn('"Обновить статус": "Refresh status"', javascript)
+        self.assertIn('"Проверить обновления": "Check for updates"', javascript)
+        self.assertEqual(javascript.count('api("/admin/api/update/check"'), 1)
+        self.assertEqual(javascript.count('api("/admin/api/update/start"'), 1)
+        self.assertIn('button:focus-visible', stylesheet)
+        self.assertIn('button[aria-busy="true"]', stylesheet)
+
+        css_version = re.search(r'/static/styles\.css\?v=([^"\s]+)', html)
+        js_version = re.search(r'/static/app\.js\?v=([^"\s]+)', html)
+        self.assertIsNotNone(css_version)
+        self.assertIsNotNone(js_version)
+        self.assertEqual(css_version.group(1), js_version.group(1))
+
+    def test_admin_shell_keeps_accessible_responsive_ui_contracts(self) -> None:
+        html = self.read("reseller_autoseller/static/index.html")
+        javascript = self.read("reseller_autoseller/static/app.js")
+        stylesheet = self.read("reseller_autoseller/static/styles.css")
+
+        self.assertIn('class="skip-link" href="#adminContent"', html)
+        self.assertIn('id="adminContent" tabindex="-1"', html)
+        self.assertIn('class="section-tabs" aria-label="Разделы панели" role="tablist"', html)
+        self.assertEqual(html.count('role="tab"'), 7)
+        self.assertEqual(html.count('role="tabpanel"'), 7)
+        self.assertIn('button.setAttribute("aria-selected", String(active))', javascript)
+        self.assertIn('event.key === "ArrowRight"', javascript)
+        self.assertIn('event.key === "ArrowLeft"', javascript)
+        self.assertIn('prefers-reduced-motion: reduce', javascript)
+
+        for token in (
+            "--color-background:",
+            "--color-surface:",
+            "--color-text:",
+            "--color-brand:",
+            "--shadow-card:",
+            "--radius-lg:",
+            "--motion-fast:",
+        ):
+            self.assertIn(token, stylesheet)
+        self.assertIn("min-height: 44px", stylesheet)
+        self.assertIn("@media (max-width: 1100px)", stylesheet)
+        self.assertIn("@media (max-width: 768px)", stylesheet)
+        self.assertIn("@media (max-width: 560px)", stylesheet)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", stylesheet)
+        self.assertRegex(stylesheet, r"\.panel\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;")
+        self.assertIn(".product-grid .mapping-source-actions", stylesheet)
+
 
 if __name__ == "__main__":
     unittest.main()

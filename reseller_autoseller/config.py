@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     notify_daily_statistics: bool = False
     free_reissue_enabled: bool = True
     digiseller_unique_code_request_enabled: bool = True
-    digiseller_unique_code_request_delay_minutes: float = Field(default=5.0, ge=0, le=24 * 60)
+    digiseller_unique_code_request_delay_minutes: float = Field(default=0.0, ge=0, le=24 * 60)
     digiseller_notification_secret: str = ""
     digiseller_sale_notifications_enabled: bool = True
     digiseller_message_notifications_enabled: bool = True

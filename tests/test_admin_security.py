@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -28,6 +30,7 @@ class AdminSecurityTests(unittest.TestCase):
             "ENABLE_TELEGRAM": "false",
             "TELEGRAM_BOT_TOKEN": "",
             "APP_BASE_URL": "https://panel.example",
+            "DIGISELLER_SELLER_ID": "",
             "DIGISELLER_API_KEY": "TEST_DIGISELLER_KEY",
         }
         patcher = patch.dict(os.environ, env, clear=False)
@@ -334,8 +337,12 @@ class AdminSecurityTests(unittest.TestCase):
             self.assertEqual(valid.status_code, 200)
             self.assertEqual(valid.json()["status"], "ignored")
 
-    def test_digiseller_sale_notification_schedules_unique_code_request(self) -> None:
-        with TemporaryDirectory() as tmp:
+    def test_digiseller_sale_notification_sends_unique_code_request_immediately_by_default(self) -> None:
+        send_message = AsyncMock(return_value=True)
+        with TemporaryDirectory() as tmp, patch(
+            "reseller_autoseller.app.MarketplaceMessenger.send_message",
+            new=send_message,
+        ):
             client = self.make_client(tmp)
             login = client.post(
                 "/admin/api/login",
@@ -371,7 +378,126 @@ class AdminSecurityTests(unittest.TestCase):
             )
 
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["action"], "unique_code_request_sent")
+            self.assertEqual(response.json()["delay_minutes"], 0)
+            send_message.assert_awaited_once()
+            self.assertEqual(send_message.await_args.args[:2], ("plati", "296240253"))
+
+            duplicate = client.post(
+                f"/api/digiseller/notify/sale/{secret}",
+                json={"ID_I": "296240253", "ID_D": "5968452", "Amount": "119", "Currency": "WMR"},
+            )
+
+            self.assertEqual(duplicate.status_code, 200)
+            self.assertEqual(duplicate.json()["status"], "ignored")
+            self.assertEqual(duplicate.json()["reason"], "request was already sent")
+            send_message.assert_awaited_once()
+
+    def test_digiseller_sale_notification_preserves_configured_delay(self) -> None:
+        send_message = AsyncMock(return_value=True)
+        with TemporaryDirectory() as tmp, patch(
+            "reseller_autoseller.app.MarketplaceMessenger.send_message",
+            new=send_message,
+        ):
+            client = self.make_client(tmp)
+            login = client.post(
+                "/admin/api/login",
+                json={"username": "admin", "password": "strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['token']}"}
+            client.patch(
+                "/admin/api/settings",
+                headers=headers,
+                json={
+                    "settings": {
+                        "digiseller_validate_sale_sha256": False,
+                        "digiseller_unique_code_request_delay_minutes": 7,
+                    }
+                },
+            )
+            client.post(
+                "/admin/api/products",
+                headers=headers,
+                json={
+                    "marketplace": "plati",
+                    "external_product_id": "5968452",
+                    "external_variant_id": "23468281",
+                    "action": "create",
+                    "action_params": {},
+                    "tariff_code": "lite_monthly",
+                    "title": "Lite 1 month",
+                    "enabled": True,
+                },
+            )
+            urls = client.get("/admin/api/digiseller/notification-urls", headers=headers).json()
+            secret = urls["sale_url"].rstrip("/").split("/")[-1]
+
+            response = client.post(
+                f"/api/digiseller/notify/sale/{secret}",
+                json={"ID_I": "296240254", "ID_D": "5968452", "Amount": "119", "Currency": "WMR"},
+            )
+
+            self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["action"], "unique_code_request_scheduled")
+            self.assertEqual(response.json()["delay_minutes"], 7)
+            send_message.assert_not_awaited()
+
+    def test_concurrent_sale_notifications_send_unique_code_request_once(self) -> None:
+        async def slow_send(*_args, **_kwargs) -> bool:
+            await asyncio.sleep(0.05)
+            return True
+
+        send_message = AsyncMock(side_effect=slow_send)
+        with TemporaryDirectory() as tmp, patch(
+            "reseller_autoseller.app.MarketplaceMessenger.send_message",
+            new=send_message,
+        ):
+            with self.make_client(tmp) as client:
+                login = client.post(
+                    "/admin/api/login",
+                    json={"username": "admin", "password": "strong-password"},
+                )
+                headers = {"Authorization": f"Bearer {login.json()['token']}"}
+                client.patch(
+                    "/admin/api/settings",
+                    headers=headers,
+                    json={"settings": {"digiseller_validate_sale_sha256": False}},
+                )
+                client.post(
+                    "/admin/api/products",
+                    headers=headers,
+                    json={
+                        "marketplace": "plati",
+                        "external_product_id": "5968452",
+                        "external_variant_id": "23468281",
+                        "action": "create",
+                        "action_params": {},
+                        "tariff_code": "lite_monthly",
+                        "title": "Lite 1 month",
+                        "enabled": True,
+                    },
+                )
+                secret = client.get(
+                    "/admin/api/digiseller/notification-urls",
+                    headers=headers,
+                ).json()["sale_url"].rstrip("/").split("/")[-1]
+                url = f"/api/digiseller/notify/sale/{secret}"
+                payload = {
+                    "ID_I": "296240255",
+                    "ID_D": "5968452",
+                    "Amount": "119",
+                    "Currency": "WMR",
+                }
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    responses = list(executor.map(lambda _: client.post(url, json=payload), range(2)))
+
+            self.assertEqual([response.status_code for response in responses], [200, 200])
+            self.assertEqual(send_message.await_count, 1)
+            self.assertEqual(
+                {response.json().get("action") for response in responses},
+                {"unique_code_request_sent", "unique_code_request_skipped"},
+            )
 
     def test_digiseller_product_alias_is_saved_as_canonical_plati(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -80,11 +80,11 @@ SETTING_DEFINITIONS = [
     ),
     SettingDefinition(
         "digiseller_unique_code_request_delay_minutes",
-        "Unique code request delay, min",
+        "Delay before unique code request, min",
         kind="number",
-        label_ru="Задержка запроса кода, мин",
-        description="How long to wait after payment before sending the first reminder.",
-        description_ru="Сколько ждать после оплаты перед первым напоминанием.",
+        label_ru="Задержка перед запросом кода, мин",
+        description="How long to wait after payment before asking for the code. Set 0 to send immediately (default).",
+        description_ru="Сколько ждать после оплаты перед запросом кода. Укажите 0, чтобы отправлять сразу (по умолчанию).",
     ),
     SettingDefinition(
         "digiseller_notification_secret",

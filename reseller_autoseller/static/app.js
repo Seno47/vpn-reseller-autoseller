@@ -6,8 +6,11 @@ const RU_TO_EN = {
   "Логин": "Login",
   "Пароль": "Password",
   "Войти": "Sign in",
+  "К основному содержанию": "Skip to main content",
+  "Ключевые показатели": "Key metrics",
   "Polling-выдача VPN-доступов через Wholesale API": "Polling delivery of VPN access via Wholesale API",
   "Обновить": "Refresh",
+  "Обновить статус": "Refresh status",
   "Выйти": "Log out",
   "Маппинг": "Mapping",
   "Шаблоны": "Templates",
@@ -18,6 +21,10 @@ const RU_TO_EN = {
   "Продажи": "Sales",
   "Обновления": "Updates",
   "Проверить обновление": "Check for updates",
+  "Проверить обновления": "Check for updates",
+  "Обновить версию": "Update version",
+  "Версия программы": "Application version",
+  "Сведения о версии загружаются...": "Loading version information...",
   "Новый / редактируемый маппинг": "New / editable mapping",
   "Ссылка / данные лота": "Lot link / data",
   "Распарсить": "Parse",
@@ -153,6 +160,15 @@ const textNodeOriginals = new WeakMap();
 
 function t(ru, en = "") {
   return currentLanguage === "en" ? (en || RU_TO_EN[ru] || ru) : ru;
+}
+
+function setButtonBusy(button, busy, {idleRu, idleEn, busyRu, busyEn}) {
+  if (!button) {
+    return;
+  }
+  button.setAttribute("aria-busy", String(busy));
+  button.disabled = busy;
+  button.textContent = busy ? t(busyRu, busyEn) : t(idleRu, idleEn);
 }
 
 function setLanguage(language) {
@@ -305,10 +321,15 @@ setLanguage(currentLanguage);
 
 function setActiveSection(section) {
   sectionTabs.forEach((button) => {
-    button.classList.toggle("active", button.dataset.sectionTab === section);
+    const active = button.dataset.sectionTab === section;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   appSections.forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.section === section);
+    const active = panel.dataset.section === section;
+    panel.classList.toggle("active", active);
+    panel.setAttribute("aria-hidden", String(!active));
   });
 }
 
@@ -733,6 +754,15 @@ function renderUpdateStatus(data) {
   if (!updateStatus) {
     return;
   }
+  updateStatus.setAttribute("aria-busy", "false");
+  if (!data) {
+    updateData = null;
+    updateStatus.innerHTML = `<p class="update-placeholder">${t("Сведения о версии недоступны.", "Version information is unavailable.")}</p>`;
+    updateNotice.dataset.state = "error";
+    updateNotice.textContent = t("Не удалось получить сведения о версии", "Could not load version information");
+    startUpdateButton.disabled = true;
+    return;
+  }
   updateData = data || {};
   const hostStatus = updateData.host_status || {};
   const available = Boolean(updateData.update_available);
@@ -753,6 +783,7 @@ function renderUpdateStatus(data) {
       <small>${escapeHtml(detail)}</small>
     </article>
   `).join("");
+  updateNotice.dataset.state = updateData.error ? "error" : (available ? "available" : "current");
   updateNotice.textContent = updateData.error
     ? `${t("Ошибка проверки", "Check error")}: ${updateData.error}`
     : statusLabel;
@@ -1751,11 +1782,50 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 logoutButton.addEventListener("click", logout);
-refreshButton.addEventListener("click", loadAll);
+refreshButton.addEventListener("click", async () => {
+  setButtonBusy(refreshButton, true, {
+    idleRu: "Обновить статус",
+    idleEn: "Refresh status",
+    busyRu: "Обновляем...",
+    busyEn: "Refreshing...",
+  });
+  try {
+    await loadAll();
+  } finally {
+    setButtonBusy(refreshButton, false, {
+      idleRu: "Обновить статус",
+      idleEn: "Refresh status",
+      busyRu: "Обновляем...",
+      busyEn: "Refreshing...",
+    });
+  }
+});
 resetMappingButton.addEventListener("click", resetMappingForm);
 
 sectionTabs.forEach((button) => {
   button.addEventListener("click", () => setActiveSection(button.dataset.sectionTab));
+  button.addEventListener("keydown", (event) => {
+    const tabs = Array.from(sectionTabs);
+    const currentIndex = tabs.indexOf(button);
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = tabs.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    const nextTab = tabs[nextIndex];
+    setActiveSection(nextTab.dataset.sectionTab);
+    nextTab.focus();
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    nextTab.scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block: "nearest", inline: "nearest"});
+  });
 });
 
 mappingSearch.addEventListener("input", () => renderProducts());
@@ -1825,14 +1895,28 @@ refreshSystemButton?.addEventListener("click", async () => {
 });
 
 checkUpdateButton?.addEventListener("click", async () => {
-  checkUpdateButton.disabled = true;
+  setButtonBusy(checkUpdateButton, true, {
+    idleRu: "Проверить обновления",
+    idleEn: "Check for updates",
+    busyRu: "Проверяем...",
+    busyEn: "Checking...",
+  });
+  updateStatus.setAttribute("aria-busy", "true");
+  updateNotice.dataset.state = "loading";
   updateNotice.textContent = t("Проверяю обновления...", "Checking for updates...");
   try {
     renderUpdateStatus(await api("/admin/api/update/check", {method: "POST"}));
   } catch (error) {
+    updateNotice.dataset.state = "error";
     updateNotice.textContent = `${t("Не удалось проверить обновление", "Could not check update")}: ${error.message || error}`;
   } finally {
-    checkUpdateButton.disabled = false;
+    updateStatus.setAttribute("aria-busy", "false");
+    setButtonBusy(checkUpdateButton, false, {
+      idleRu: "Проверить обновления",
+      idleEn: "Check for updates",
+      busyRu: "Проверяем...",
+      busyEn: "Checking...",
+    });
   }
 });
 
@@ -1840,14 +1924,30 @@ startUpdateButton?.addEventListener("click", async () => {
   if (!confirm(t("Запустить обновление? Приложение перезапустится после завершения.", "Start update? The app will restart after completion."))) {
     return;
   }
-  startUpdateButton.disabled = true;
+  setButtonBusy(startUpdateButton, true, {
+    idleRu: "Обновить версию",
+    idleEn: "Update version",
+    busyRu: "Запускаем...",
+    busyEn: "Starting...",
+  });
+  let updateStarted = false;
+  updateNotice.dataset.state = "loading";
   updateNotice.textContent = t("Запускаю обновление...", "Starting update...");
   try {
     const result = await api("/admin/api/update/start", {method: "POST"});
+    updateStarted = true;
     updateNotice.textContent = `${t("Обновление запущено", "Update started")}: ${result.request_id || ""}`;
   } catch (error) {
+    updateNotice.dataset.state = "error";
     updateNotice.textContent = `${t("Не удалось запустить обновление", "Could not start update")}: ${error.message || error}`;
-    startUpdateButton.disabled = !(updateData?.update_supported && updateData?.update_available);
+  } finally {
+    setButtonBusy(startUpdateButton, false, {
+      idleRu: "Обновить версию",
+      idleEn: "Update version",
+      busyRu: "Запускаем...",
+      busyEn: "Starting...",
+    });
+    startUpdateButton.disabled = updateStarted || !(updateData?.update_supported && updateData?.update_available);
   }
 });
 

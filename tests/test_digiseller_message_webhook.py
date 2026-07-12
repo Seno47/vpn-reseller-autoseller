@@ -254,6 +254,7 @@ class DigisellerMessageWebhookTests(unittest.TestCase):
             settings = Settings(_env_file=None)
 
         self.assertFalse(settings.digiseller_polling_fallback_enabled)
+        self.assertEqual(settings.digiseller_unique_code_request_delay_minutes, 0)
 
     def test_fallback_reads_unread_chat_list_once_not_every_pending_plati_chat(self) -> None:
         pending_loop_completed = threading.Event()

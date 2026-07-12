@@ -136,11 +136,52 @@ class AppRuntimeFlowTests(unittest.TestCase):
             "DIGISELLER_SELLER_ID": "",
             "DIGISELLER_API_KEY": "",
             "DIGISELLER_NOTIFICATION_SECRET": "notification-secret",
+            "DIGISELLER_UNIQUE_CODE_REQUEST_DELAY_MINUTES": "0",
             "GGSEL_SELLER_ID": "",
             "GGSEL_API_KEY": "",
         }
         values.update(overrides)
         return values
+
+    def test_zero_delay_sale_event_sends_request_on_first_background_cycle(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, self.env(tmp), clear=False):
+            get_settings.cache_clear()
+            self.addCleanup(get_settings.cache_clear)
+            db = Database(Path(tmp) / "test.sqlite3")
+            db.init()
+            db.upsert_product(
+                {
+                    "marketplace": "plati",
+                    "external_product_id": "p1",
+                    "tariff_code": "lite_monthly",
+                }
+            )
+            db.add_order_event(
+                marketplace="plati",
+                external_order_id="296100009",
+                event_type="digiseller_sale_notification_received",
+                payload={"product_id": "p1"},
+            )
+            digiseller = FakeRuntimeDigiseller()
+
+            with (
+                patch("reseller_autoseller.app.RuntimeDigisellerClient", return_value=digiseller),
+                TestClient(create_app()),
+            ):
+                deadline = time.time() + 3
+                while not digiseller.messages and time.time() < deadline:
+                    time.sleep(0.02)
+
+            self.assertEqual(len(digiseller.messages), 1)
+            self.assertEqual(digiseller.messages[0][0], "296100009")
+            events = db.list_order_events(marketplace="plati", external_order_id="296100009")
+            self.assertEqual(
+                sum(
+                    event["event_type"] == "unique_code_request_sent" and event["status"] == "success"
+                    for event in events
+                ),
+                1,
+            )
 
     def test_free_commands_cannot_access_order_from_another_chat(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, self.env(tmp), clear=False):

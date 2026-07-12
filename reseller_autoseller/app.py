@@ -173,6 +173,7 @@ def create_app() -> FastAPI:
     recent_notifications: dict[str, float] = {}
     recent_digiseller_blind_syncs: dict[str, float] = {}
     digiseller_chat_sync_locks: dict[str, asyncio.Lock] = {}
+    digiseller_unique_code_request_locks: dict[str, asyncio.Lock] = {}
     poll_error_notifications: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
     admin_sessions: dict[str, float] = {}
@@ -514,7 +515,7 @@ def create_app() -> FastAPI:
         try:
             minutes = runtime.get_float("digiseller_unique_code_request_delay_minutes")
         except Exception:
-            minutes = 5.0
+            minutes = 0.0
         return timedelta(minutes=max(0.0, min(minutes, 24 * 60)))
 
     def marketplace_messages_configured(marketplace: str) -> bool:
@@ -669,7 +670,11 @@ def create_app() -> FastAPI:
         retry_delay = max(digiseller_unique_code_request_delay(), timedelta(minutes=30))
         if event_recent(events, {"unique_code_request_failed"}, retry_delay):
             return False, "request failed recently"
-        if not paid_at:
+        # Without a trustworthy payment timestamp, the old delayed mode first
+        # records when the candidate was seen so it cannot notify an old buyer
+        # immediately. A configured zero delay explicitly opts into sending on
+        # this first cycle.
+        if not paid_at and digiseller_unique_code_request_delay() > timedelta(0):
             if event_recent(events, {"unique_code_request_candidate_seen"}, digiseller_unique_code_request_delay()):
                 return False, "candidate was seen recently"
             if not any(str(event.get("event_type") or "") == "unique_code_request_candidate_seen" for event in events):
@@ -696,62 +701,67 @@ def create_app() -> FastAPI:
         }
 
     async def request_unique_code_from_sale_notification(invoice_id: str, payload: dict[str, Any], *, event_id: int) -> bool:
-        if not runtime.get_bool("digiseller_unique_code_request_enabled"):
-            return False
-        if db.digiseller_invoice_has_delivery(invoice_id):
-            return False
-        events = db.list_order_events(marketplace="plati", external_order_id=invoice_id, limit=100)
-        if any(str(event.get("event_type") or "") == "unique_code_seen" for event in events):
-            return False
-        if any(str(event.get("event_type") or "") == "unique_code_request_sent" and str(event.get("status") or "") == "success" for event in events):
-            return False
-        retry_delay = max(digiseller_unique_code_request_delay(), timedelta(minutes=30))
-        if event_recent(events, {"unique_code_request_failed"}, retry_delay):
-            return False
-        product_id = str(payload.get("product_id") or "").strip()
-        mapped_products = mapped_plati_products_by_id(product_id)
-        if not product_id or not mapped_products:
-            return False
-        product = mapped_products[0]
-        purchase = sale_notification_purchase(invoice_id, payload, product_id)
-        text = delivery_service.render_system_text(
-            "request_unique_code",
-            unique_code_request_context(invoice_id, purchase, product),
-        )
+        request_lock = digiseller_unique_code_request_locks.setdefault(invoice_id, asyncio.Lock())
+        async with request_lock:
+            # Recheck all idempotency conditions after acquiring the per-order
+            # lock. A duplicate webhook or the reminder loop may have completed
+            # the send while this coroutine was waiting.
+            if not runtime.get_bool("digiseller_unique_code_request_enabled"):
+                return False
+            if db.digiseller_invoice_has_delivery(invoice_id):
+                return False
+            events = db.list_order_events(marketplace="plati", external_order_id=invoice_id, limit=100)
+            if any(str(event.get("event_type") or "") == "unique_code_seen" for event in events):
+                return False
+            if any(str(event.get("event_type") or "") == "unique_code_request_sent" and str(event.get("status") or "") == "success" for event in events):
+                return False
+            retry_delay = max(digiseller_unique_code_request_delay(), timedelta(minutes=30))
+            if event_recent(events, {"unique_code_request_failed"}, retry_delay):
+                return False
+            product_id = str(payload.get("product_id") or "").strip()
+            mapped_products = mapped_plati_products_by_id(product_id)
+            if not product_id or not mapped_products:
+                return False
+            product = mapped_products[0]
+            purchase = sale_notification_purchase(invoice_id, payload, product_id)
+            text = delivery_service.render_system_text(
+                "request_unique_code",
+                unique_code_request_context(invoice_id, purchase, product),
+            )
 
-        if await messenger.send_message("plati", invoice_id, text):
+            if await messenger.send_message("plati", invoice_id, text):
+                db.add_order_event(
+                    marketplace="plati",
+                    external_order_id=invoice_id,
+                    event_type="unique_code_request_sent",
+                    status="success",
+                    payload={
+                        "product_id": product_id,
+                        "source": "digiseller_sale_notification",
+                        "sale_notification_event_id": event_id,
+                    },
+                )
+                notify_admins(
+                    f"📨 <b>{tr('Запрошен уникальный код Digiseller', 'Digiseller unique code requested')}</b>\n"
+                    f"{tr('Источник', 'Source')}: <b>URL notification</b>\n"
+                    f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
+                    f"{tr('Товар', 'Product')}: <code>{escape(product_id)}</code>",
+                    kind="pending",
+                )
+                return True
             db.add_order_event(
                 marketplace="plati",
                 external_order_id=invoice_id,
-                event_type="unique_code_request_sent",
-                status="success",
+                event_type="unique_code_request_failed",
+                status="error",
+                message="Cannot send unique code request to Digiseller chat",
                 payload={
                     "product_id": product_id,
                     "source": "digiseller_sale_notification",
                     "sale_notification_event_id": event_id,
                 },
             )
-            notify_admins(
-                f"📨 <b>{tr('Запрошен уникальный код Digiseller', 'Digiseller unique code requested')}</b>\n"
-                f"{tr('Источник', 'Source')}: <b>URL notification</b>\n"
-                f"{tr('Заказ', 'Order')}: <code>{escape(invoice_id)}</code>\n"
-                f"{tr('Товар', 'Product')}: <code>{escape(product_id)}</code>",
-                kind="pending",
-            )
-            return True
-        db.add_order_event(
-            marketplace="plati",
-            external_order_id=invoice_id,
-            event_type="unique_code_request_failed",
-            status="error",
-            message="Cannot send unique code request to Digiseller chat",
-            payload={
-                "product_id": product_id,
-                "source": "digiseller_sale_notification",
-                "sale_notification_event_id": event_id,
-            },
-        )
-        return False
+            return False
 
     async def process_digiseller_sale_notification_reminders() -> None:
         if not runtime.get_bool("digiseller_sale_notifications_enabled"):
@@ -2067,10 +2077,23 @@ def create_app() -> FastAPI:
         events = db.list_order_events(marketplace="plati", external_order_id=invoice_id, limit=100)
         if any(str(event.get("event_type") or "") == "unique_code_request_sent" and str(event.get("status") or "") == "success" for event in events):
             return {"status": "ignored", "reason": "request was already sent"}
+        delay_minutes = runtime.get_float("digiseller_unique_code_request_delay_minutes")
+        if delay_minutes <= 0:
+            sent = await request_unique_code_from_sale_notification(
+                invoice_id,
+                event_payload(sale_event),
+                event_id=int(sale_event.get("id") or 0),
+            )
+            return {
+                "status": "ok" if sent else "ignored",
+                "action": "unique_code_request_sent" if sent else "unique_code_request_skipped",
+                "delay_minutes": 0,
+                "event_id": sale_event.get("id"),
+            }
         return {
             "status": "ok",
             "action": "unique_code_request_scheduled",
-            "delay_minutes": runtime.get_float("digiseller_unique_code_request_delay_minutes"),
+            "delay_minutes": delay_minutes,
             "event_id": sale_event.get("id"),
         }
 
