@@ -8,6 +8,13 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.ggsel_test_data import (
+    TEST_OFFER_ID,
+    TEST_OPTION_ID,
+    TEST_VARIANT_ID_START,
+    make_ggsel_offer_spec,
+)
+
 from scripts.publish_ggsel_offer import (
     GgselPublishError,
     build_notification_settings,
@@ -24,9 +31,7 @@ from scripts.publish_ggsel_offer import (
 class PublishGgselOfferTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.spec = json.loads(
-            Path("output/ggsel-vless/offer-spec.json").read_text(encoding="utf-8")
-        )
+        cls.spec = make_ggsel_offer_spec()
 
     def test_builds_all_profitable_variants_from_final_prices(self) -> None:
         payload = build_variant_payload(self.spec)
@@ -34,7 +39,10 @@ class PublishGgselOfferTests(unittest.TestCase):
         self.assertEqual(len(payload), 12)
         self.assertEqual(payload[0]["price"], 0)
         self.assertTrue(payload[0]["is_default"])
-        self.assertEqual(payload[-1]["price"], 3239 - 49)
+        self.assertEqual(
+            payload[-1]["price"],
+            self.spec["variants"][-1]["final_price_rub"] - self.spec["offer"]["price"],
+        )
         self.assertEqual(payload[-1]["impact_type"], "increase")
         self.assertEqual(
             [
@@ -136,8 +144,14 @@ class PublishGgselOfferTests(unittest.TestCase):
         sync_notifications: bool,
         sync_offer: bool = False,
     ) -> Namespace:
+        spec_path = state.parent / "spec.json"
+        cover_path = state.parent / "cover.jpg"
+        spec = copy.deepcopy(self.spec)
+        spec["cover_image_ru_path"] = str(cover_path)
+        spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        cover_path.write_bytes(b"synthetic-test-cover")
         return Namespace(
-            spec=Path("output/ggsel-vless/offer-spec.json"),
+            spec=spec_path,
             state=state,
             base_url="https://seller.ggsel.com",
             dry_run=False,
@@ -147,7 +161,7 @@ class PublishGgselOfferTests(unittest.TestCase):
             activation_timeout=1.0,
         )
 
-    def _fake_client(self, *, offer_id: int = 102587326):
+    def _fake_client(self, *, offer_id: int = TEST_OFFER_ID):
         spec = self.spec
 
         class FakeClient:
@@ -160,13 +174,13 @@ class PublishGgselOfferTests(unittest.TestCase):
 
             @staticmethod
             def options(requested_offer_id: int) -> list[dict[str, object]]:
-                return [{"id": 5621406, "title_ru": spec["option"]["title_ru"]}]
+                return [{"id": TEST_OPTION_ID, "title_ru": spec["option"]["title_ru"]}]
 
             @staticmethod
             def option(requested_offer_id: int, option_id: int) -> dict[str, object]:
                 return {
                     "variants": [
-                        {"id": 31499125 + index, "title_ru": item["title_ru"]}
+                        {"id": TEST_VARIANT_ID_START + index, "title_ru": item["title_ru"]}
                         for index, item in enumerate(spec["variants"])
                     ]
                 }
@@ -186,12 +200,12 @@ class PublishGgselOfferTests(unittest.TestCase):
 
     def _sync_state(self) -> dict[str, object]:
         return {
-            "offer_id": 102587326,
-            "option_id": 5621406,
+            "offer_id": TEST_OFFER_ID,
+            "option_id": TEST_OPTION_ID,
             "mappings": [
                 {
                     "tariff_code": item["tariff_code"],
-                    "external_variant_id": str(31499125 + index),
+                    "external_variant_id": str(TEST_VARIANT_ID_START + index),
                 }
                 for index, item in enumerate(self.spec["variants"])
             ],
@@ -206,7 +220,7 @@ class PublishGgselOfferTests(unittest.TestCase):
         spec = self.spec
         old_offer = {
             **copy.deepcopy(spec["offer"]),
-            "id": 102587326,
+            "id": TEST_OFFER_ID,
             "status": "active",
             "price": 59,
             "title_ru": "Old title",
@@ -218,7 +232,7 @@ class PublishGgselOfferTests(unittest.TestCase):
         ):
             old_variants.append(
                 {
-                    "id": 31499125 + index,
+                    "id": TEST_VARIANT_ID_START + index,
                     **payload,
                     "price": max(0, int(variant_spec["final_price_rub"]) - 59),
                 }
@@ -236,7 +250,7 @@ class PublishGgselOfferTests(unittest.TestCase):
 
             @staticmethod
             def options(offer_id: int) -> list[dict[str, object]]:
-                return [{"id": 5621406, "title_ru": spec["option"]["title_ru"]}]
+                return [{"id": TEST_OPTION_ID, "title_ru": spec["option"]["title_ru"]}]
 
             def option(self, offer_id: int, option_id: int) -> dict[str, object]:
                 return {
@@ -253,7 +267,7 @@ class PublishGgselOfferTests(unittest.TestCase):
                     for update in payload["variants"]:
                         by_id[int(update["id"])].update(update)
                     self.variants = [by_id[int(item["id"])] for item in self.variants]
-                elif method == "PATCH" and path == "/api_sellers/v2/offers/102587326":
+                elif method == "PATCH" and path == f"/api_sellers/v2/offers/{TEST_OFFER_ID}":
                     if self.fail_first_offer_patch:
                         self.fail_first_offer_patch = False
                         raise GgselPublishError("synthetic PATCH failure")
@@ -274,10 +288,10 @@ class PublishGgselOfferTests(unittest.TestCase):
 
         synced_offer, synced_option = sync_existing_offer(
             client=client,
-            offer_id=102587326,
-            option_id=5621406,
-            offer=client.offer(102587326),
-            option_detail=client.option(102587326, 5621406),
+            offer_id=TEST_OFFER_ID,
+            option_id=TEST_OPTION_ID,
+            offer=client.offer(TEST_OFFER_ID),
+            option_detail=client.option(TEST_OFFER_ID, TEST_OPTION_ID),
             spec=self.spec,
             state=self._sync_state(),
             notification_settings=notification,
@@ -288,7 +302,7 @@ class PublishGgselOfferTests(unittest.TestCase):
         self.assertEqual(synced_offer["notification_settings"], notification)
         self.assertEqual(
             [item["id"] for item in synced_option["variants"]],
-            list(range(31499125, 31499137)),
+            list(range(TEST_VARIANT_ID_START, TEST_VARIANT_ID_START + len(self.spec["variants"]))),
         )
         self.assertEqual(
             [49 + int(item["price"]) for item in synced_option["variants"]],
@@ -307,10 +321,10 @@ class PublishGgselOfferTests(unittest.TestCase):
         with self.assertRaisesRegex(GgselPublishError, "synthetic PATCH failure"):
             sync_existing_offer(
                 client=client,
-                offer_id=102587326,
-                option_id=5621406,
-                offer=client.offer(102587326),
-                option_detail=client.option(102587326, 5621406),
+                offer_id=TEST_OFFER_ID,
+                option_id=TEST_OPTION_ID,
+                offer=client.offer(TEST_OFFER_ID),
+                option_detail=client.option(TEST_OFFER_ID, TEST_OPTION_ID),
                 spec=self.spec,
                 state=self._sync_state(),
                 notification_settings=configured,
@@ -328,7 +342,7 @@ class PublishGgselOfferTests(unittest.TestCase):
             prepare_existing_variant_sync(
                 self.spec,
                 state,
-                client.option(102587326, 5621406),
+                client.option(TEST_OFFER_ID, TEST_OPTION_ID),
             )
 
         self.assertEqual(client.requests, [])
@@ -379,7 +393,7 @@ class PublishGgselOfferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             state_path.write_text(
-                json.dumps({"offer_id": 102587326, "option_id": 5621406}), encoding="utf-8"
+                json.dumps({"offer_id": TEST_OFFER_ID, "option_id": TEST_OPTION_ID}), encoding="utf-8"
             )
             with (
                 patch("scripts.publish_ggsel_offer.configured_notification_settings", return_value=notification),
@@ -388,10 +402,10 @@ class PublishGgselOfferTests(unittest.TestCase):
             ):
                 result = publish(self._publish_args(state_path, sync_notifications=True))
 
-            self.assertEqual(result["offer_id"], 102587326)
+            self.assertEqual(result["offer_id"], TEST_OFFER_ID)
             patch_calls = [request for request in fake_client.requests if request[0] == "PATCH"]
             self.assertEqual(len(patch_calls), 1)
-            self.assertEqual(patch_calls[0][1], "/api_sellers/v2/offers/102587326")
+            self.assertEqual(patch_calls[0][1], f"/api_sellers/v2/offers/{TEST_OFFER_ID}")
             self.assertEqual(patch_calls[0][2]["json"], {"notification_settings": notification})
             self.assertTrue(patch_calls[0][2]["sensitive"])
             persisted = state_path.read_text(encoding="utf-8")
@@ -412,7 +426,7 @@ class PublishGgselOfferTests(unittest.TestCase):
             ):
                 result = publish(self._publish_args(state_path, sync_notifications=False))
 
-            self.assertEqual(result["offer_id"], 102587326)
+            self.assertEqual(result["offer_id"], TEST_OFFER_ID)
             create_calls = [
                 request
                 for request in fake_client.requests
