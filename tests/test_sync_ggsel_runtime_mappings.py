@@ -10,14 +10,17 @@ from scripts.sync_ggsel_runtime_mappings import (
     RuntimeMappingSyncError,
     synchronize_runtime_mappings,
 )
+from tests.ggsel_test_data import (
+    TEST_OFFER_ID,
+    TEST_VARIANT_ID_START,
+    make_ggsel_offer_spec,
+)
 
 
 class SyncGgselRuntimeMappingsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.spec = json.loads(
-            Path("output/ggsel-vless/offer-spec.json").read_text(encoding="utf-8")
-        )
+        cls.spec = make_ggsel_offer_spec()
 
     def prepare_files(self, root: Path) -> tuple[Path, Path, Path]:
         database_path = root / "runtime.sqlite3"
@@ -28,10 +31,10 @@ class SyncGgselRuntimeMappingsTests(unittest.TestCase):
         database = Database(database_path)
         database.init()
         for index, variant in enumerate(self.spec["variants"]):
-            variant_id = str(31499125 + index)
+            variant_id = str(TEST_VARIANT_ID_START + index)
             mappings.append(
                 {
-                    "external_product_id": "102587326",
+                    "external_product_id": str(TEST_OFFER_ID),
                     "external_variant_id": variant_id,
                     "tariff_code": variant["tariff_code"],
                 }
@@ -39,7 +42,7 @@ class SyncGgselRuntimeMappingsTests(unittest.TestCase):
             database.upsert_product(
                 {
                     "marketplace": "ggsel",
-                    "external_product_id": "102587326",
+                    "external_product_id": str(TEST_OFFER_ID),
                     "external_variant_id": variant_id,
                     "tariff_code": variant["tariff_code"],
                     "title": "Old title",
@@ -47,7 +50,7 @@ class SyncGgselRuntimeMappingsTests(unittest.TestCase):
                 }
             )
         state_path.write_text(
-            json.dumps({"offer_id": 102587326, "mappings": mappings}),
+            json.dumps({"offer_id": TEST_OFFER_ID, "mappings": mappings}),
             encoding="utf-8",
         )
         return database_path, spec_path, state_path

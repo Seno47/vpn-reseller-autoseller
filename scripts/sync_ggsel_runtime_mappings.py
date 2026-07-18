@@ -150,8 +150,8 @@ def parse_args() -> argparse.Namespace:
         description="Atomically synchronize GGSEL runtime mapping copy from the reviewed offer spec"
     )
     parser.add_argument("--database", type=Path, default=Path("data/reseller.sqlite3"))
-    parser.add_argument("--spec", type=Path, default=Path("output/ggsel-vless/offer-spec.json"))
-    parser.add_argument("--state", type=Path, default=Path("data/ggsel-vless-publish-state.json"))
+    parser.add_argument("--spec", type=Path, required=True, help="Private offer spec JSON")
+    parser.add_argument("--state", type=Path, default=Path("data/ggsel-publish-state.json"))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 

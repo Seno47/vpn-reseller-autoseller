@@ -806,14 +806,12 @@ def publish(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Create or resume the neutral GGSEL VLESS offer")
-    parser.add_argument(
-        "--spec", type=Path, default=Path("output/ggsel-vless/offer-spec.json"), help="Offer spec JSON"
-    )
+    parser = argparse.ArgumentParser(description="Create, resume, or synchronize a GGSEL offer")
+    parser.add_argument("--spec", type=Path, required=True, help="Private offer spec JSON")
     parser.add_argument(
         "--state",
         type=Path,
-        default=Path("output/ggsel-vless/publish-state.json"),
+        default=Path("data/ggsel-publish-state.json"),
         help="Idempotency and mapping state JSON",
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
