@@ -147,13 +147,16 @@ const RU_TO_EN = {
   "Покупатель не прислал уникальный код": "Buyer has not sent the unique code",
   "Код от другого заказа": "Code from another order",
   "URL-уведомления Digiseller": "Digiseller URL notifications",
+  "URL-уведомления GGsel": "GGsel URL notifications",
   "Продажа товара": "Product sale",
   "Сообщения": "Messages",
   "Метод": "Method",
   "Скопировать": "Copy",
   "В Digiseller откройте Личный кабинет → Уведомления → URL. Для продажи товара вставьте первый URL, для сообщений второй URL.": "In Digiseller open Account → Notifications → URL. Use the first URL for product sales and the second URL for messages.",
   "Для сообщений включите передачу тела сообщения.": "Enable message body forwarding for messages.",
-  "Если домена нет, используйте публичный URL reverse tunnel и укажите его как Base URL.": "If there is no domain, use a public reverse tunnel URL and set it as Base URL."
+  "Если домена нет, используйте публичный URL reverse tunnel и укажите его как Base URL.": "If there is no domain, use a public reverse tunnel URL and set it as Base URL.",
+  "Укажите этот URL в notification settings товара GGsel для нового заказа.": "Set this URL in the GGsel offer notification settings for new orders.",
+  "Каждый заказ перед выдачей повторно проверяется через Seller API.": "Every order is verified again through the Seller API before fulfillment."
 };
 
 const textNodeOriginals = new WeakMap();
@@ -238,6 +241,7 @@ const productForm = document.querySelector("#productForm");
 const resetMappingButton = document.querySelector("#resetMappingButton");
 const settingsForm = document.querySelector("#settingsForm");
 const digisellerNotificationUrls = document.querySelector("#digisellerNotificationUrls");
+const ggselNotificationUrl = document.querySelector("#ggselNotificationUrl");
 const botUserForm = document.querySelector("#botUserForm");
 const restartTelegramButton = document.querySelector("#restartTelegramButton");
 const telegramRestartStatus = document.querySelector("#telegramRestartStatus");
@@ -1543,6 +1547,42 @@ function renderDigisellerNotificationUrls(config) {
   });
 }
 
+function renderGgselNotificationUrl(config) {
+  if (!ggselNotificationUrl) {
+    return;
+  }
+  if (!config) {
+    ggselNotificationUrl.innerHTML = "";
+    return;
+  }
+  const enabled = config.sale_notifications_enabled ? t("включено", "enabled") : t("выключено", "disabled");
+  const fallbackSeconds = Number(config.polling_fallback_interval_seconds || 0);
+  ggselNotificationUrl.innerHTML = `
+    <div class="webhook-head">
+      <h3>${t("URL-уведомления GGsel", "GGsel URL notifications")}</h3>
+      <span class="pill neutral">orders: ${enabled}</span>
+      <span class="pill neutral">fallback: ${escapeHtml(String(fallbackSeconds))}s</span>
+    </div>
+    <p>${t("Укажите этот URL в notification settings товара GGsel для нового заказа.", "Set this URL in the GGsel offer notification settings for new orders.")}</p>
+    <label>${t("Новый заказ", "New order")}
+      <div class="copy-row">
+        <input readonly value="${escapeHtml(config.url || "")}">
+        <button class="secondary" type="button" data-copy-ggsel-url>${t("Скопировать", "Copy")}</button>
+      </div>
+      <small>${t("Метод", "Method")}: ${escapeHtml(config.method || "POST")}</small>
+    </label>
+    <small>${t("Каждый заказ перед выдачей повторно проверяется через Seller API.", "Every order is verified again through the Seller API before fulfillment.")}</small>
+  `;
+  const copyButton = ggselNotificationUrl.querySelector("[data-copy-ggsel-url]");
+  copyButton?.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(config.url || "");
+    copyButton.textContent = "OK";
+    setTimeout(() => {
+      copyButton.textContent = t("Скопировать", "Copy");
+    }, 900);
+  });
+}
+
 function renderBotUsers(rows) {
   botUsers.innerHTML = rows.map((row) => {
     const action = row.locked
@@ -1701,7 +1741,7 @@ async function loadAll() {
   try {
     const selectedPeriod = statisticsPeriod?.value || "30d";
     const pendingStatus = pendingStatusFilter?.value || "waiting_order_id";
-    const [status, systemConfig, updateConfig, productsRows, salesRows, settingsRows, notificationUrls, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
+    const [status, systemConfig, updateConfig, productsRows, salesRows, settingsRows, notificationUrls, ggselNotificationConfig, botUserRows, tariffsRows, templateConfig, complexVariableConfig, statisticsConfig, pendingConfig, eventsConfig] = await Promise.all([
       api("/admin/api/status"),
       api("/admin/api/system").catch(() => null),
       api("/admin/api/update").catch(() => null),
@@ -1709,6 +1749,7 @@ async function loadAll() {
       api("/admin/api/sales"),
       api("/admin/api/settings"),
       api("/admin/api/digiseller/notification-urls"),
+      api("/admin/api/ggsel/notification-url").catch(() => null),
       api("/admin/api/bot-users"),
       api("/admin/api/tariffs").catch(() => []),
       api("/admin/api/delivery-template"),
@@ -1735,6 +1776,7 @@ async function loadAll() {
     renderSales(salesRows);
     renderSettings(settingsRows);
     renderDigisellerNotificationUrls(notificationUrls);
+    renderGgselNotificationUrl(ggselNotificationConfig);
     renderBotUsers(botUserRows);
     renderTariffOptions(tariffsRows);
     renderTemplateVariables(templateConfig);

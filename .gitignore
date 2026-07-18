@@ -3,5 +3,13 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.playwright-cli/
 data/*
 !data/.gitkeep
+output/*
+!output/ggsel-vless/
+output/ggsel-vless/*
+!output/ggsel-vless/README.md
+!output/ggsel-vless/offer-spec.json
+!output/ggsel-vless/seller-avatar-ggsel.jpg
+!output/ggsel-vless/vless-cover-ru.jpg

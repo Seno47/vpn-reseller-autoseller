@@ -94,18 +94,36 @@ class FakeRuntimeDigiseller:
 
 
 class FakeRuntimeGgsel:
-    def __init__(self, *, sales=None, details=None, messages=None) -> None:
+    def __init__(
+        self,
+        *,
+        sales=None,
+        details=None,
+        messages=None,
+        unread_chats=None,
+        unread_once: bool = False,
+        send_outcomes=None,
+    ) -> None:
         self.sales = list(sales or [])
         self.details = dict(details or {})
         self.messages_by_order = dict(messages or {})
+        self.unread_chat_rows = list(unread_chats or [])
+        self.unread_once = unread_once
+        self.send_outcomes = list(send_outcomes or [])
         self.order_info_calls: list[str] = []
         self.sent_messages: list[tuple[str, str]] = []
+        self.send_attempts = 0
         self.message_read = threading.Event()
+        self.sales_read = threading.Event()
+        self.last_sales_calls = 0
+        self.unread_chat_calls = 0
 
     def configured_for_polling(self) -> bool:
         return True
 
     async def last_sales(self):
+        self.last_sales_calls += 1
+        self.sales_read.set()
         return self.sales
 
     async def order_info(self, order_id: str):
@@ -116,12 +134,23 @@ class FakeRuntimeGgsel:
         return value
 
     async def send_order_message(self, order_id: str, message: str):
+        self.send_attempts += 1
+        outcome = self.send_outcomes.pop(0) if self.send_outcomes else {"ok": True}
+        if isinstance(outcome, Exception):
+            raise outcome
         self.sent_messages.append((order_id, message))
-        return {"ok": True}
+        return outcome
 
     async def order_messages(self, order_id: str):
         self.message_read.set()
         return list(self.messages_by_order.get(order_id, []))
+
+    async def unread_chats(self):
+        self.unread_chat_calls += 1
+        rows = list(self.unread_chat_rows)
+        if self.unread_once:
+            self.unread_chat_rows = []
+        return rows
 
 
 class AppRuntimeFlowTests(unittest.TestCase):
@@ -139,6 +168,7 @@ class AppRuntimeFlowTests(unittest.TestCase):
             "DIGISELLER_UNIQUE_CODE_REQUEST_DELAY_MINUTES": "0",
             "GGSEL_SELLER_ID": "",
             "GGSEL_API_KEY": "",
+            "GGSEL_NOTIFICATION_SECRET": "ggsel-notification-secret",
         }
         values.update(overrides)
         return values
@@ -265,9 +295,13 @@ class AppRuntimeFlowTests(unittest.TestCase):
                 ggsel = FakeRuntimeGgsel(
                     sales=[{"invoice_id": "o3"}, {"invoice_id": "o2"}, {"invoice_id": "o1"}, {"invoice_id": "o0"}],
                     details={
-                        "o1": {"invoice_id": "o1", "product_id": "p1"},
+                        "o1": {
+                            "content": {"invoice_state": 3, "owner": "seller", "item_id": "p1"}
+                        },
                         "o2": RuntimeError("temporary GGsel failure"),
-                        "o3": {"invoice_id": "o3", "product_id": "p1"},
+                        "o3": {
+                            "content": {"invoice_state": 3, "owner": "seller", "item_id": "p1"}
+                        },
                     },
                 )
                 xyranet = FakeRuntimeXyra()
@@ -285,6 +319,266 @@ class AppRuntimeFlowTests(unittest.TestCase):
                 self.assertEqual(db.get_chat_cursor("ggsel", "_last_sales"), "o1")
                 self.assertEqual(len(xyranet.create_calls), 2)
                 self.assertEqual(len(ggsel.sent_messages), 2)
+
+    def test_ggsel_historical_sales_are_watermarked_without_existing_cursor(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "ggsel",
+                        "external_product_id": "p1",
+                        "external_variant_id": "v1",
+                        "tariff_code": "lite_monthly",
+                    }
+                )
+                ggsel = FakeRuntimeGgsel(
+                    sales=[
+                        {"invoice_id": "o2", "product": {"id": "p1"}},
+                        {"invoice_id": "o1", "product": {"id": "p1"}},
+                    ],
+                    details={
+                        "o1": {
+                            "retval": 0,
+                            "content": {
+                                "invoice_state": 3,
+                                "owner": "seller",
+                                "item_id": "p1",
+                                "options": [{"id": 10, "user_data_id": "v1"}],
+                            },
+                        },
+                        "o2": {
+                            "retval": 0,
+                            "content": {
+                                "invoice_state": 3,
+                                "owner": "seller",
+                                "item_id": "p1",
+                                "options": [{"id": 10, "user_data_id": "v1"}],
+                            },
+                        },
+                    },
+                )
+                xyranet = FakeRuntimeXyra()
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    patch("reseller_autoseller.app.RuntimeXyraNetClient", return_value=xyranet),
+                    TestClient(create_app()),
+                ):
+                    deadline = time.time() + 3
+                    while db.get_setting("_ggsel_sales_cursor_initialized") != "1" and time.time() < deadline:
+                        time.sleep(0.02)
+                    time.sleep(0.05)
+
+                self.assertEqual(xyranet.create_calls, [])
+                self.assertEqual(ggsel.sent_messages, [])
+                self.assertEqual(db.get_chat_cursor("ggsel", "_last_sales"), "o2")
+                self.assertEqual(db.get_setting("_ggsel_sales_cursor_initialized"), "1")
+                for order_id in ("o1", "o2"):
+                    self.assertIsNone(db.get_sale_with_delivery("ggsel", order_id))
+
+    def test_ggsel_foreign_order_is_rejected_before_delivery(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.set_chat_cursor("ggsel", "_last_sales", "o0")
+                db.upsert_product(
+                    {"marketplace": "ggsel", "external_product_id": "p1", "tariff_code": "lite_monthly"}
+                )
+                ggsel = FakeRuntimeGgsel(
+                    sales=[{"invoice_id": "o1", "product": {"id": "p1"}}, {"invoice_id": "o0"}],
+                    details={
+                        "o1": {
+                            "content": {"invoice_state": 3, "owner": "another-seller", "item_id": "p1"}
+                        }
+                    },
+                )
+                xyranet = FakeRuntimeXyra()
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    patch("reseller_autoseller.app.RuntimeXyraNetClient", return_value=xyranet),
+                    TestClient(create_app()),
+                ):
+                    deadline = time.time() + 3
+                    while not ggsel.order_info_calls and time.time() < deadline:
+                        time.sleep(0.02)
+                    time.sleep(0.05)
+
+                self.assertEqual(xyranet.create_calls, [])
+                self.assertEqual(ggsel.sent_messages, [])
+                self.assertEqual(db.get_chat_cursor("ggsel", "_last_sales"), "o1")
+                events = db.list_order_events(marketplace="ggsel", external_order_id="o1")
+                self.assertTrue(any(item["event_type"] == "polling_sale_rejected" for item in events))
+
+    def test_ggsel_order_callback_requires_secret_and_wakes_verified_polling(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                ggsel = FakeRuntimeGgsel()
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    TestClient(create_app()) as client,
+                ):
+                    self.assertTrue(ggsel.sales_read.wait(timeout=3))
+                    baseline = ggsel.last_sales_calls
+
+                    rejected = client.post("/api/ggsel/notify/order/wrong-secret", json={"id_i": "o1"})
+                    self.assertEqual(rejected.status_code, 404)
+                    time.sleep(0.05)
+                    self.assertEqual(ggsel.last_sales_calls, baseline)
+
+                    accepted = client.post(
+                        "/api/ggsel/notify/order/ggsel-notification-secret",
+                        json={"id_i": "o1", "untrusted": "ignored"},
+                    )
+                    self.assertEqual(accepted.status_code, 200)
+                    self.assertEqual(accepted.json()["status"], "accepted")
+                    deadline = time.time() + 3
+                    while ggsel.last_sales_calls == baseline and time.time() < deadline:
+                        time.sleep(0.02)
+                    self.assertGreater(ggsel.last_sales_calls, baseline)
+
+    def test_disabled_ggsel_order_callback_does_not_wake_polling(self) -> None:
+        env = self.env(
+            tmp="placeholder",
+            GGSEL_SELLER_ID="seller",
+            GGSEL_API_KEY="key",
+            GGSEL_SALE_NOTIFICATIONS_ENABLED="false",
+        )
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                ggsel = FakeRuntimeGgsel()
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    TestClient(create_app()) as client,
+                ):
+                    self.assertTrue(ggsel.sales_read.wait(timeout=3))
+                    baseline = ggsel.last_sales_calls
+                    response = client.get("/api/ggsel/notify/order/ggsel-notification-secret")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["status"], "ignored")
+                    time.sleep(0.1)
+                    self.assertEqual(ggsel.last_sales_calls, baseline)
+
+    def test_ggsel_unread_poll_saves_only_unread_messages_without_pending_operation(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                ggsel = FakeRuntimeGgsel(
+                    unread_chats=[{"id_i": "chat1", "cnt_new": 1}],
+                    messages={
+                        "chat1": [
+                            {"id": "m-old", "message": "old history", "buyer": True},
+                            {"id": "m-new", "message": "new buyer message", "buyer": True},
+                        ]
+                    },
+                )
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    TestClient(create_app()),
+                ):
+                    self.assertTrue(ggsel.message_read.wait(timeout=3))
+                    time.sleep(0.05)
+
+                messages = db.list_chat_messages("ggsel", "chat1")
+                self.assertEqual([message["text"] for message in messages], ["new buyer message"])
+                self.assertEqual(db.get_chat_cursor("ggsel", "chat1"), "m-new")
+
+    def test_ggsel_chat_with_zero_unread_count_is_not_fetched(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                ggsel = FakeRuntimeGgsel(
+                    unread_chats=[{"id_i": "chat1", "cnt_new": 0}],
+                    messages={"chat1": [{"id": "m1", "message": "ignored", "buyer": True}]},
+                )
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    TestClient(create_app()),
+                ):
+                    deadline = time.time() + 3
+                    while ggsel.unread_chat_calls == 0 and time.time() < deadline:
+                        time.sleep(0.02)
+                    self.assertGreater(ggsel.unread_chat_calls, 0)
+                    self.assertFalse(ggsel.message_read.is_set())
+
+    def test_ggsel_failed_command_is_retried_from_persisted_inbox_after_chat_becomes_read(self) -> None:
+        env = self.env(tmp="placeholder", GGSEL_SELLER_ID="seller", GGSEL_API_KEY="key")
+        with TemporaryDirectory() as tmp:
+            env["DATABASE_PATH"] = os.path.join(tmp, "test.sqlite3")
+            with patch.dict(os.environ, env, clear=False):
+                get_settings.cache_clear()
+                self.addCleanup(get_settings.cache_clear)
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                product = db.upsert_product(
+                    {"marketplace": "ggsel", "external_product_id": "p1", "tariff_code": "lite_monthly"}
+                )
+                sale = db.create_sale(
+                    SaleEvent("ggsel", "chat1", "p1", "", None, None, None, None, {})
+                )
+                db.create_delivery(
+                    int(sale["id"]),
+                    int(product["id"]),
+                    {
+                        "xyranet_order_id": "ord_retry12345",
+                        "subscription_url": "https://sub/retry",
+                        "panel_username": "buyer",
+                        "tariff_code": "lite_monthly",
+                        "delivery_text": "delivery",
+                        "raw_response": {},
+                    },
+                )
+                ggsel = FakeRuntimeGgsel(
+                    unread_chats=[{"id_i": "chat1", "cnt_new": 1}],
+                    unread_once=True,
+                    messages={
+                        "chat1": [
+                            {"id": "m1", "message": "!status ord_retry12345", "buyer": True}
+                        ]
+                    },
+                    send_outcomes=[RuntimeError("temporary GGsel send failure"), {"ok": True}],
+                )
+                xyranet = FakeRuntimeXyra()
+                with (
+                    patch("reseller_autoseller.app.RuntimeGgselClient", return_value=ggsel),
+                    patch("reseller_autoseller.app.RuntimeXyraNetClient", return_value=xyranet),
+                    patch("reseller_autoseller.app.MARKETPLACE_POLL_LOOP_SECONDS", 0.05),
+                    patch("reseller_autoseller.app.GGSEL_CHAT_POLL_INTERVAL_SECONDS", 0.05),
+                    TestClient(create_app()),
+                ):
+                    deadline = time.time() + 3
+                    while ggsel.send_attempts < 2 and time.time() < deadline:
+                        time.sleep(0.02)
+
+                self.assertEqual(ggsel.send_attempts, 2)
+                self.assertEqual(len(ggsel.sent_messages), 1)
+                self.assertEqual(db.get_chat_cursor("ggsel", "chat1"), "m1")
+                self.assertEqual(db.get_setting("_ggsel_chat_retry_messages"), "{}")
+                self.assertEqual(len(db.list_chat_messages("ggsel", "chat1")), 2)
 
     def test_free_reissue_message_failure_is_not_acknowledged_and_reuses_idempotency_key(self) -> None:
         with TemporaryDirectory() as tmp, patch.dict(os.environ, self.env(tmp), clear=False):
@@ -466,7 +760,8 @@ class AppRuntimeFlowTests(unittest.TestCase):
                     action_params={},
                 )
                 ggsel = FakeRuntimeGgsel(
-                    messages={"chat1": [{"id": "m1", "message": "!renew {ORDER_ID}", "is_seller": True}]}
+                    messages={"chat1": [{"id": "m1", "message": "!renew {ORDER_ID}", "is_seller": True}]},
+                    unread_chats=[{"id_i": "chat1", "cnt_new": 1}],
                 )
                 xyranet = FakeRuntimeXyra()
                 with (
@@ -497,8 +792,16 @@ class AppRuntimeFlowTests(unittest.TestCase):
                 ggsel = FakeRuntimeGgsel(
                     sales=[{"invoice_id": "o2"}, {"invoice_id": "o1"}, {"invoice_id": "o0"}],
                     details={
-                        "o1": {"invoice_id": "o1", "product_id": "missing-product"},
-                        "o2": {"invoice_id": "o2", "product_id": "p1"},
+                        "o1": {
+                            "content": {
+                                "invoice_state": 3,
+                                "owner": "seller",
+                                "item_id": "missing-product",
+                            }
+                        },
+                        "o2": {
+                            "content": {"invoice_state": 3, "owner": "seller", "item_id": "p1"}
+                        },
                     },
                 )
                 xyranet = FakeRuntimeXyra()

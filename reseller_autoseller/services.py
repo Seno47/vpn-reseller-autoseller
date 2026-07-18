@@ -333,6 +333,7 @@ DELIVERY_TEMPLATE_VARIABLES = {
     "ORDER_ID": "ID заказа",
     "PANEL_USERNAME": "Профиль в панели",
     "TARIFF_CODE": "Код тарифа",
+    "TARIFF_NAME": "Понятное название тарифа",
     "EXPIRE_AT": "Дата окончания",
     "SUBSCRIPTION_URL": "Ссылка подписки",
     "DEVICE_LIMIT": "Лимит устройств / IP",
@@ -360,6 +361,7 @@ DELIVERY_TEMPLATE_VARIABLE_DESCRIPTIONS = {
     "ORDER_ID": "ID заказа XyraNet, который получает покупатель.",
     "PANEL_USERNAME": "Имя профиля в панели XyraNet.",
     "TARIFF_CODE": "Код тарифа, по которому создана или продлена подписка.",
+    "TARIFF_NAME": "Понятное покупателю название тарифа, например Lite · 1 месяц.",
     "EXPIRE_AT": "Дата окончания подписки из ответа API.",
     "SUBSCRIPTION_URL": "Ссылка подключения к подписке.",
     "DEVICE_LIMIT": "Текущий лимит устройств или IP из ответа API.",
@@ -423,6 +425,10 @@ class DeliveryInProgressError(RuntimeError):
 
 class MarketplaceMessageError(RuntimeError):
     """A saved delivery could not be sent to the marketplace chat."""
+
+
+class PendingOrderOwnershipError(ValueError):
+    """A remote marketplace operation targeted an order owned by another chat."""
 
 
 class DeliveryService:
@@ -528,8 +534,31 @@ class DeliveryService:
                 return {"status": "waiting_order_id", "delivery_text": ask_text, "sale": sale, "pending": pending}
             if pending_status == "processing":
                 raise DeliveryInProgressError(f"Pending operation is already being processed: {pending['id']}")
-            if pending_status == "completed" and pending.get("result_text"):
-                return {"status": "duplicate", "delivery_text": str(pending["result_text"]), "sale": sale, "pending": pending}
+            if pending_status == "completed":
+                target_order_id = str(pending.get("target_order_id") or "").strip()
+                if event.marketplace == "ggsel" and not self.db.marketplace_chat_owns_order(
+                    "ggsel",
+                    event.external_order_id,
+                    target_order_id,
+                ):
+                    raise PendingOrderOwnershipError("Target order does not belong to this GGSEL purchase chat")
+                completed_sale = self.db.get_sale_with_delivery_by_id(int(sale["id"]))
+                if not completed_sale or not completed_sale.get("delivery_id"):
+                    raise ValueError("Completed pending operation has no saved delivery")
+                if notify_marketplace:
+                    await self.ensure_delivery_message_sent(
+                        completed_sale,
+                        marketplace=event.marketplace,
+                        external_order_id=marketplace_chat_order_id(event),
+                        sale_id=int(sale["id"]),
+                    )
+                return {
+                    "status": "duplicate",
+                    "delivery_text": str(completed_sale.get("delivery_text") or ""),
+                    "sale": completed_sale,
+                    "delivery": completed_sale,
+                    "pending": pending,
+                }
             if pending_status == "error":
                 raise RuntimeError(f"Pending operation requires an explicit retry: {pending.get('error_text') or pending['id']}")
 
@@ -655,7 +684,14 @@ class DeliveryService:
         delivery["purchase_quantity"] = str(quantity)
         delivery["command_help"] = self.render_system_text("command_help", delivery)
 
-        delivery_text = self.render_action_text("create", delivery)
+        product_template = str(product.get("delivery_template") or "").strip()
+        if product_template:
+            delivery_text = self.render_template_with_complex_variables(
+                product_template,
+                {**self.command_context("create"), **delivery},
+            )
+        else:
+            delivery_text = self.render_action_text("create", delivery)
         raw_response: dict[str, Any] = api_response
         if renew_responses:
             raw_response = {
@@ -708,6 +744,20 @@ class DeliveryService:
 
     async def _complete_pending_operation_locked(self, pending: dict[str, Any], target_order_id: str) -> dict[str, Any]:
         current = self.db.get_pending_operation(int(pending["id"])) or pending
+        selected_target_order_id = str(target_order_id or "").strip()
+        if not selected_target_order_id:
+            raise ValueError("Target order ID is required")
+        if str(current.get("marketplace") or "").strip().lower() == "ggsel" and not self.db.marketplace_chat_owns_order(
+            "ggsel",
+            str(current.get("external_order_id") or ""),
+            selected_target_order_id,
+        ):
+            # GGSEL does not currently expose a stable, verified buyer identity
+            # that can link two different purchase chats. Until it does, never
+            # let a paid operation mutate or reveal an order from another chat.
+            # Keep this guard before the completed branch so corrupted/replayed
+            # pending rows cannot resend a victim's saved subscription URL.
+            raise PendingOrderOwnershipError("Target order does not belong to this GGSEL purchase chat")
         if str(current.get("status") or "") == "completed":
             sale = self.db.get_sale_with_delivery_by_id(int(current["sale_id"]))
             if not sale or not sale.get("delivery_id"):
@@ -728,7 +778,7 @@ class DeliveryService:
                 "pending": current,
             }
 
-        claimed = self.db.claim_pending_operation(int(current["id"]), target_order_id=target_order_id)
+        claimed = self.db.claim_pending_operation(int(current["id"]), target_order_id=selected_target_order_id)
         if not claimed:
             raise DeliveryInProgressError(f"Pending operation is already being processed: {current['id']}")
         claim_token = str(claimed["processing_token"])
@@ -761,14 +811,14 @@ class DeliveryService:
                     product=product,
                     action=str(claimed["action"]),
                     action_params=parse_json_object(claimed.get("action_params")),
-                    target_order_id=target_order_id,
+                    target_order_id=selected_target_order_id,
                     idempotency_key=f"{claimed['marketplace']}:{claimed['external_order_id']}:pending:{claimed['id']}",
                     message_order_id=str(claimed["external_order_id"]),
                     heartbeat=heartbeat,
                 )
             completed = self.db.complete_pending_operation(
                 int(claimed["id"]),
-                target_order_id=target_order_id,
+                target_order_id=selected_target_order_id,
                 result_text=result["delivery_text"],
                 raw_response=result.get("raw_response") or {},
                 claim_token=claim_token,
@@ -785,7 +835,7 @@ class DeliveryService:
             pending_operation_id=int(claimed["id"]),
             event_type="pending_completed",
             status="success",
-            payload={"target_order_id": target_order_id, "action": claimed["action"]},
+            payload={"target_order_id": selected_target_order_id, "action": claimed["action"]},
         )
         return {**result, "pending": completed}
 
@@ -1255,11 +1305,13 @@ def extract_order_delivery(response: dict[str, Any]) -> dict[str, str]:
     order = raw_order if isinstance(raw_order, dict) else {}
     raw_subscription = order.get("subscription")
     subscription = raw_subscription if isinstance(raw_subscription, dict) else {}
+    tariff_code = str(subscription.get("tariff_code") or "")
     return {
         "order_id": str(order.get("order_id") or ""),
         "panel_username": str(order.get("panel_username") or ""),
         "subscription_url": str(subscription.get("subscription_url") or ""),
-        "tariff_code": str(subscription.get("tariff_code") or ""),
+        "tariff_code": tariff_code,
+        "tariff_name": tariff_display_name(tariff_code),
         "expire_at": str(subscription.get("expire_at") or ""),
         "device_limit": str(subscription.get("ip_limit") or subscription.get("device_limit") or order.get("ip_limit") or order.get("device_limit") or ""),
         "lte_quota": format_lte_quota(
@@ -1270,6 +1322,26 @@ def extract_order_delivery(response: dict[str, Any]) -> dict[str, str]:
             or subscription.get("traffic_limit_bytes")
         ),
     }
+
+
+def tariff_display_name(value: Any) -> str:
+    code = str(value or "").strip()
+    normalized = code.lower()
+    tier_code, separator, term_code = normalized.partition("_")
+    if not separator:
+        return code
+    tier = {"lite": "Lite", "pro": "Premium", "premium": "Premium"}.get(tier_code)
+    term = {
+        "weekly": "7 дней",
+        "monthly": "1 месяц",
+        "3m": "3 месяца",
+        "6m": "6 месяцев",
+        "1y": "12 месяцев",
+        "2y": "24 месяца",
+    }.get(term_code)
+    if not tier or not term:
+        return code
+    return f"{tier} · {term}"
 
 
 def extract_target_order_id(payload: dict[str, Any]) -> str:

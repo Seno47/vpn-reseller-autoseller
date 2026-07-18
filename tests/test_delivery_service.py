@@ -12,10 +12,12 @@ from reseller_autoseller.services import (
     DeliveryInProgressError,
     MarketplaceMessageError,
     DeliveryService,
+    extract_order_delivery,
     extract_order_id_from_text,
     parse_chat_command,
     render_template,
     sale_quantity,
+    tariff_display_name,
 )
 from reseller_autoseller.statistics import build_sales_statistics
 
@@ -222,6 +224,19 @@ class DeliveryServiceTests(unittest.TestCase):
 
         self.assertEqual(text, "ID ord-1 devices 2 quota 10 ГБ legacy ord-1")
 
+    def test_tariff_display_name_is_human_readable_and_safe_for_unknown_codes(self) -> None:
+        self.assertEqual(tariff_display_name("lite_weekly"), "Lite · 7 дней")
+        self.assertEqual(tariff_display_name("pro_2y"), "Premium · 24 месяца")
+        self.assertEqual(tariff_display_name("custom_plan"), "custom_plan")
+
+    def test_extract_order_delivery_includes_human_readable_tariff(self) -> None:
+        delivery = extract_order_delivery(
+            {"order": {"subscription": {"tariff_code": "pro_6m"}}}
+        )
+
+        self.assertEqual(delivery["tariff_code"], "pro_6m")
+        self.assertEqual(delivery["tariff_name"], "Premium · 6 месяцев")
+
     def test_custom_complex_variable_expands_inside_delivery_template(self) -> None:
         with TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "test.sqlite3")
@@ -322,6 +337,32 @@ class DeliveryServiceTests(unittest.TestCase):
                 self.assertEqual(first["status"], "delivered")
                 self.assertEqual(second["status"], "duplicate")
                 self.assertEqual(client.calls, 1)
+
+        asyncio.run(scenario())
+
+    def test_create_uses_product_delivery_template(self) -> None:
+        async def scenario() -> None:
+            with TemporaryDirectory() as tmp:
+                db = Database(Path(tmp) / "test.sqlite3")
+                db.init()
+                db.upsert_product(
+                    {
+                        "marketplace": "ggsel",
+                        "external_product_id": "p1",
+                        "tariff_code": "lite_monthly",
+                        "title": "Lite",
+                        "delivery_template": "Готово: {TARIFF_NAME}\n{SUBSCRIPTION_URL}",
+                    }
+                )
+                service = DeliveryService(db=db, xyranet=FakeXyraClient())
+                event = SaleEvent("ggsel", "o-template", "p1", "", None, None, None, None, {})
+
+                result = await service.handle_sale(event, notify_marketplace=False)
+
+                self.assertEqual(
+                    result["delivery_text"],
+                    "Готово: Lite · 1 месяц\nhttps://x.example/sub",
+                )
 
         asyncio.run(scenario())
 

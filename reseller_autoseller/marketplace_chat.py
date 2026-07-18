@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -11,7 +13,133 @@ import httpx
 log = logging.getLogger(__name__)
 
 
+class GgselOrderValidationError(ValueError):
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+class GgselApiError(RuntimeError):
+    """An actionable GGsel API failure.
+
+    ``status_code`` and ``retry_after`` let pollers distinguish throttling and
+    temporary server failures from permanent request errors without parsing an
+    exception message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+    @property
+    def retryable(self) -> bool:
+        return self.status_code == 429 or bool(self.status_code and self.status_code >= 500)
+
+
+def _ggsel_response_layers(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    layers: list[dict[str, Any]] = []
+    pending = [payload]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        layers.append(current)
+        for key in ("data", "content"):
+            nested = current.get(key)
+            if isinstance(nested, dict):
+                pending.append(nested)
+    return layers
+
+
+def _ggsel_scalar(payload: dict[str, Any], key: str) -> str:
+    for layer in _ggsel_response_layers(payload):
+        value = layer.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return str(value).strip()
+    return ""
+
+
+def _ggsel_summary_product_id(summary: dict[str, Any]) -> str:
+    for key in ("item_id", "id_goods", "product_id", "offer_id"):
+        value = summary.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return str(value).strip()
+    product = summary.get("product")
+    if isinstance(product, dict):
+        for key in ("id", "item_id", "product_id", "offer_id"):
+            value = product.get(key)
+            if value not in (None, "") and not isinstance(value, (dict, list)):
+                return str(value).strip()
+    return ""
+
+
+def verified_ggsel_order_content(
+    summary: dict[str, Any],
+    detail: dict[str, Any],
+    *,
+    seller_id: str,
+) -> dict[str, Any]:
+    """Return the verified order content or reject it before fulfillment."""
+
+    layers = _ggsel_response_layers(detail)
+    content = next(
+        (
+            layer
+            for layer in layers
+            if any(key in layer for key in ("invoice_state", "owner", "item_id"))
+        ),
+        {},
+    )
+    state_text = _ggsel_scalar(content, "invoice_state")
+    if not state_text:
+        raise GgselOrderValidationError("GGsel order has no invoice_state")
+    try:
+        state = int(state_text)
+    except ValueError as exc:
+        raise GgselOrderValidationError("GGsel order has invalid invoice_state") from exc
+    if state not in {3, 4}:
+        raise GgselOrderValidationError(
+            f"GGsel order is not payable for delivery (invoice_state={state})",
+            permanent=state in {2, 5},
+        )
+
+    owner = _ggsel_scalar(content, "owner")
+    expected_owner = str(seller_id or "").strip()
+    if not owner:
+        raise GgselOrderValidationError("GGsel order has no owner")
+    if not expected_owner or owner != expected_owner:
+        raise GgselOrderValidationError(
+            f"GGsel order owner mismatch (expected {expected_owner or '<configured seller>'}, got {owner})",
+            permanent=True,
+        )
+
+    item_id = _ggsel_scalar(content, "item_id")
+    if not item_id:
+        raise GgselOrderValidationError("GGsel order has no item_id")
+    summary_item_id = _ggsel_summary_product_id(summary)
+    if summary_item_id and item_id != summary_item_id:
+        raise GgselOrderValidationError(
+            f"GGsel order item mismatch (summary {summary_item_id}, detail {item_id})",
+            permanent=True,
+        )
+    return content
+
+
 class GgselChatClient:
+    LAST_SALES_TOP = 100
+
     def __init__(
         self,
         *,
@@ -28,12 +156,21 @@ class GgselChatClient:
         self._token_until = 0.0
 
     def headers(self) -> dict[str, str]:
-        token = self._token or self.api_key
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self.api_key}",
         }
+
+    @staticmethod
+    def _v1_headers(*, locale: bool = False) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if locale:
+            headers["locale"] = "ru"
+        return headers
 
     def configured_for_polling(self) -> bool:
         return bool(self.seller_id and self.api_key)
@@ -43,27 +180,36 @@ class GgselChatClient:
             raise RuntimeError("GGsel seller ID/API key are not configured")
         if self._token and time.monotonic() < self._token_until:
             return self._token
+        try:
+            seller_id = int(self.seller_id)
+        except ValueError as exc:
+            raise RuntimeError("GGsel seller ID must be an integer") from exc
+        timestamp = str(int(time.time()))
+        sign = hashlib.sha256(f"{self.api_key}{timestamp}".encode("utf-8")).hexdigest()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/api_sellers/api/apilogin",
-                json={"seller_id": self.seller_id, "api_key": self.api_key},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                json={"seller_id": seller_id, "timestamp": timestamp, "sign": sign},
+                headers=self._v1_headers(),
             )
-        data = self._json_response(response, "GGsel login API")
+        data = self._v1_response(response, "GGsel login API")
         data_dict = data if isinstance(data, dict) else {}
-        token = self._pick_text(data_dict, "token", "access_token", "jwt", "api_token")
+        token = ""
+        for layer in _ggsel_response_layers(data_dict):
+            token = self._pick_text(layer, "token", "access_token", "jwt", "api_token")
+            if token:
+                break
         if not token:
-            nested = data_dict.get("data")
-            token = self._pick_text(nested if isinstance(nested, dict) else {}, "token", "access_token", "jwt")
-        if not token:
-            raise RuntimeError("GGsel login API did not return token")
+            message = self._response_message(data_dict)
+            suffix = f": {message}" if message else ""
+            raise RuntimeError(f"GGsel login API did not return token{suffix}")
         self._token = token
         self._token_until = time.monotonic() + 50 * 60
         return token
 
     async def auth_headers(self) -> dict[str, str]:
         await self.token()
-        return self.headers()
+        return self._v1_headers()
 
     @staticmethod
     def _pick_text(payload: dict[str, Any], *keys: str) -> str:
@@ -76,15 +222,67 @@ class GgselChatClient:
         return ""
 
     @staticmethod
+    def _retry_after(response: httpx.Response) -> float | None:
+        value = response.headers.get("Retry-After", "").strip()
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                return max(0.0, retry_at.timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+    @staticmethod
     def _json_response(response: httpx.Response, label: str) -> Any:
         if response.status_code >= 400:
-            raise RuntimeError(f"{label} {response.status_code}: {response.text}")
+            detail = response.text
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            message = GgselChatClient._response_message(payload)
+            if message:
+                detail = message
+            raise GgselApiError(
+                f"{label} {response.status_code}: {detail}",
+                status_code=response.status_code,
+                retry_after=GgselChatClient._retry_after(response),
+            )
         if not response.text.strip():
             return {"status": "ok"}
         try:
             return response.json()
         except ValueError as exc:
-            raise RuntimeError(f"{label} returned invalid JSON") from exc
+            raise GgselApiError(
+                f"{label} returned invalid JSON",
+                status_code=response.status_code,
+            ) from exc
+
+    @staticmethod
+    def _response_message(payload: Any) -> str:
+        for layer in _ggsel_response_layers(payload):
+            for key in ("retdesc", "desc", "message", "error"):
+                value = layer.get(key)
+                if value not in (None, "") and not isinstance(value, (dict, list)):
+                    return str(value).strip()
+        return ""
+
+    @classmethod
+    def _v1_response(cls, response: httpx.Response, label: str) -> Any:
+        data = cls._json_response(response, label)
+        for layer in _ggsel_response_layers(data):
+            retval = layer.get("retval")
+            if retval not in (None, "", 0, "0"):
+                message = cls._response_message(data) or f"retval={retval}"
+                raise GgselApiError(
+                    f"{label}: {message}",
+                    status_code=response.status_code,
+                    retry_after=cls._retry_after(response),
+                )
+        return data
 
     @staticmethod
     def _list_from_response(data: Any) -> list[dict[str, Any]]:
@@ -92,7 +290,18 @@ class GgselChatClient:
             return [item for item in data if isinstance(item, dict)]
         if not isinstance(data, dict):
             return []
-        for key in ("items", "sales", "orders", "purchases", "messages", "chats", "data", "result"):
+        for key in (
+            "items",
+            "sales",
+            "orders",
+            "purchases",
+            "messages",
+            "chats",
+            "rows",
+            "data",
+            "content",
+            "result",
+        ):
             value = data.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -105,41 +314,53 @@ class GgselChatClient:
     async def last_sales(self) -> list[dict[str, Any]]:
         if not self.configured_for_polling():
             return []
-        headers = await self.auth_headers()
+        token = await self.token()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(
                 f"{self.base_url}/api_sellers/api/seller-last-sales",
-                headers=headers,
+                params={"token": token, "top": self.LAST_SALES_TOP},
+                headers=self._v1_headers(locale=True),
             )
-        return self._list_from_response(self._json_response(response, "GGsel sales API"))
+        return self._list_from_response(self._v1_response(response, "GGsel sales API"))
 
     async def order_info(self, order_id: str) -> dict[str, Any]:
         if not self.configured_for_polling():
             return {}
-        headers = await self.auth_headers()
+        token = await self.token()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(
                 f"{self.base_url}/api_sellers/api/purchase/info/{order_id}",
-                headers=headers,
+                params={"token": token},
+                headers=self._v1_headers(locale=True),
             )
-        data = self._json_response(response, "GGsel order API")
+        data = self._v1_response(response, "GGsel order API")
         return data if isinstance(data, dict) else {"items": data}
+
+    async def unread_chats(self) -> list[dict[str, Any]]:
+        if not self.configured_for_polling():
+            return []
+        token = await self.token()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(
+                f"{self.base_url}/api_sellers/api/debates/v2/chats",
+                params={"token": token},
+                headers=self._v1_headers(locale=True),
+            )
+        return self._list_from_response(self._v1_response(response, "GGsel unread chats API"))
 
     async def send_order_message(self, order_id: str, message: str) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("GGsel API key is not configured")
         if self.configured_for_polling():
-            try:
-                headers = await self.auth_headers()
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(
-                        f"{self.base_url}/api_sellers/api/debates/v2",
-                        json={"invoice_id": order_id, "message": message},
-                        headers=headers,
-                    )
-                return self._json_response(response, "GGsel chat API")
-            except Exception:
-                log.exception("Cannot send GGsel message through seller API, falling back to legacy chat endpoint")
+            token = await self.token()
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api_sellers/api/debates/v2",
+                    params={"token": token, "id_i": order_id},
+                    json={"message": message},
+                    headers=self._v1_headers(),
+                )
+            return self._v1_response(response, "GGsel chat API")
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/api/seller/chats/messages",
@@ -152,17 +373,14 @@ class GgselChatClient:
         if not self.api_key:
             raise RuntimeError("GGsel API key is not configured")
         if self.configured_for_polling():
-            try:
-                headers = await self.auth_headers()
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.get(
-                        f"{self.base_url}/api_sellers/api/debates/v2",
-                        params={"invoice_id": order_id},
-                        headers=headers,
-                    )
-                return self._list_from_response(self._json_response(response, "GGsel chat API"))
-            except Exception:
-                log.exception("Cannot read GGsel messages through seller API, falling back to legacy chat endpoint")
+            token = await self.token()
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api_sellers/api/debates/v2",
+                    params={"token": token, "id_i": order_id, "count": 100},
+                    headers=self._v1_headers(),
+                )
+            return self._list_from_response(self._v1_response(response, "GGsel chat API"))
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(
                 f"{self.base_url}/api/seller/chats/messages",
@@ -205,6 +423,9 @@ class RuntimeGgselClient:
     async def order_info(self, order_id: str) -> dict[str, Any]:
         return await self.client().order_info(order_id)
 
+    async def unread_chats(self) -> list[dict[str, Any]]:
+        return await self.client().unread_chats()
+
     async def send_order_message(self, order_id: str, message: str) -> dict[str, Any]:
         return await self.client().send_order_message(order_id, message)
 
@@ -220,11 +441,13 @@ class MarketplaceMessenger:
         ggsel: GgselChatClient | None = None,
         db: Any | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,
+        on_error: Callable[[str, Exception], None] | None = None,
     ) -> None:
         self.digiseller = digiseller
         self.ggsel = ggsel
         self.db = db
         self.on_message = on_message
+        self.on_error = on_error
 
     async def send_message(
         self,
@@ -244,8 +467,10 @@ class MarketplaceMessenger:
             else:
                 log.warning("No messenger configured for marketplace %s", marketplace)
                 return False
-        except Exception:
+        except Exception as exc:
             log.exception("Cannot send marketplace message for %s:%s", marketplace, external_order_id)
+            if self.on_error:
+                self.on_error(marketplace, exc)
             return False
         try:
             self._record_sent_message(

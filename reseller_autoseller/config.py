@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     digiseller_notification_password: str = ""
     ggsel_seller_id: str = ""
     ggsel_api_key: str = ""
+    ggsel_notification_secret: str = ""
+    ggsel_sale_notifications_enabled: bool = True
+    ggsel_sales_polling_fallback_interval_seconds: float = Field(default=300.0, ge=30, le=86400)
 
     telegram_bot_token: str = ""
     admin_ids: list[int] = Field(default_factory=list)
