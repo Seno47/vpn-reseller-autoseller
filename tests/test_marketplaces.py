@@ -30,12 +30,48 @@ class MarketplaceNormalizeTests(unittest.TestCase):
                 "offer_id": "offer-9",
                 "button_id": "lite-button",
                 "customer_email": "buyer@example.com",
+                "amount": "90.09",
+                "currency_type": "USD",
             },
         )
 
         self.assertEqual(event.external_order_id, "ord-1")
         self.assertEqual(event.external_product_id, "offer-9")
         self.assertEqual(event.external_variant_id, "lite-button")
+        self.assertEqual(event.amount, "90.09")
+        self.assertEqual(event.currency, "USD")
+
+    def test_normalize_ggsel_variant_from_order_options(self) -> None:
+        event = normalize_sale(
+            "ggsel",
+            {
+                "external_order_id": "ord-1",
+                "external_product_id": "offer-9",
+                "content": {
+                    "options": [
+                        {
+                            "id": 77,
+                            "name": "Tariff",
+                            "user_data_id": 23468281,
+                        }
+                    ]
+                },
+            },
+        )
+
+        self.assertEqual(event.external_variant_id, "23468281")
+
+    def test_normalize_ggsel_does_not_treat_option_id_as_variant_id(self) -> None:
+        event = normalize_sale(
+            "ggsel",
+            {
+                "external_order_id": "ord-1",
+                "external_product_id": "offer-9",
+                "content": {"options": [{"id": 77, "name": "Email", "user_data": "buyer@example.com"}]},
+            },
+        )
+
+        self.assertEqual(event.external_variant_id, "")
 
     def test_rejects_unsupported_marketplace(self) -> None:
         with self.assertRaises(ValueError):

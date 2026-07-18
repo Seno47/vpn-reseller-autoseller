@@ -23,6 +23,15 @@ class FrontendDeploymentContractTests(unittest.TestCase):
         self.assertIn("chown appuser:appuser /app/data", dockerfile)
         self.assertNotIn("chown -R appuser:appuser /app", dockerfile)
 
+    def test_marketplace_callback_secrets_are_not_written_to_access_logs(self) -> None:
+        runner = self.read("run.py")
+        installer = self.read("scripts/install-linux.sh")
+
+        self.assertIn("access_log=False", runner)
+        self.assertIn("ggsel/notify/order", installer)
+        self.assertIn("digiseller/notify/(sale|message)", installer)
+        self.assertIn("access_log off;", installer)
+
     def test_docker_context_excludes_secrets_and_runtime_artifacts(self) -> None:
         ignored = set(self.read(".dockerignore").splitlines())
 
@@ -193,6 +202,15 @@ class FrontendDeploymentContractTests(unittest.TestCase):
         self.assertIn("row.kind === \"number\" ? ' step=\"any\"'", javascript)
         self.assertIn('t("Не удалось сохранить настройки", "Could not save settings")', javascript)
         self.assertIn('typeof payload?.detail === "string"', javascript)
+
+    def test_settings_show_copyable_ggsel_callback(self) -> None:
+        html = self.read("reseller_autoseller/static/index.html")
+        javascript = self.read("reseller_autoseller/static/app.js")
+
+        self.assertIn('id="ggselNotificationUrl"', html)
+        self.assertIn('api("/admin/api/ggsel/notification-url")', javascript)
+        self.assertIn("function renderGgselNotificationUrl(config)", javascript)
+        self.assertIn("data-copy-ggsel-url", javascript)
 
     def test_update_controls_are_visible_once_at_the_top_of_the_panel(self) -> None:
         html = self.read("reseller_autoseller/static/index.html")

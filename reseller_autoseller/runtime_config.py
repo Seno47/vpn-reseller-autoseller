@@ -136,6 +136,30 @@ SETTING_DEFINITIONS = [
     ),
     SettingDefinition("ggsel_seller_id", "GGsel seller ID", label_ru="GGsel seller ID"),
     SettingDefinition("ggsel_api_key", "GGsel API key", sensitive=True, label_ru="GGsel API key"),
+    SettingDefinition(
+        "ggsel_notification_secret",
+        "GGsel order notification secret",
+        sensitive=True,
+        label_ru="Секрет URL-уведомлений GGsel",
+        description="Secret part of the GGsel new-order notification URL.",
+        description_ru="Секретная часть URL для уведомлений GGsel о новых заказах.",
+    ),
+    SettingDefinition(
+        "ggsel_sale_notifications_enabled",
+        "GGsel order notifications",
+        kind="boolean",
+        label_ru="URL-уведомления GGsel о заказах",
+        description="Accept GGsel new-order callbacks. Every order is verified through the seller API before fulfillment.",
+        description_ru="Принимать callback GGsel о новых заказах. Перед выдачей каждый заказ проверяется через API продавца.",
+    ),
+    SettingDefinition(
+        "ggsel_sales_polling_fallback_interval_seconds",
+        "GGsel sales fallback interval, sec",
+        kind="number",
+        label_ru="Интервал fallback-проверки продаж GGsel, сек",
+        description="Periodic last-sales check used when a callback is delayed or has no order ID (30-86400 seconds).",
+        description_ru="Периодическая проверка последних продаж на случай задержки callback или отсутствия ID заказа (30–86400 секунд).",
+    ),
     SettingDefinition("enable_telegram", "Telegram enabled", kind="boolean", restart_required=True, label_ru="Telegram включён"),
     SettingDefinition("telegram_bot_token", "Telegram bot token", sensitive=True, restart_required=True, label_ru="Токен Telegram-бота"),
     SettingDefinition("notify_new_purchases", "Notify: new purchases", kind="boolean", label_ru="Уведомлять о новых покупках"),
@@ -274,6 +298,8 @@ class RuntimeConfig:
                 raise ValueError("API timeout must be greater than zero and no more than 300 seconds")
             if key == "digiseller_unique_code_request_delay_minutes" and not 0 <= number <= 24 * 60:
                 raise ValueError("Unique code request delay must be between 0 and 1440 minutes")
+            if key == "ggsel_sales_polling_fallback_interval_seconds" and not 30 <= number <= 86400:
+                raise ValueError("GGsel sales fallback interval must be between 30 and 86400 seconds")
             stored = str(number)
         elif definition.kind == "select":
             stored = str(value).strip().lower()

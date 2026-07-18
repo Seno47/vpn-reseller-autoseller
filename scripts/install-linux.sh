@@ -520,6 +520,17 @@ server {
     listen 80;
     server_name ${domain};
 
+    # Marketplace callback credentials are embedded in the URL path by the
+    # upstream APIs. Never persist those paths in nginx access logs.
+    location ~ ^/api/(digiseller/notify/(sale|message)|ggsel/notify/order)/ {
+        access_log off;
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_set_header Host \$host;

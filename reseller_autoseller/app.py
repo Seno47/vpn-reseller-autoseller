@@ -41,8 +41,14 @@ from reseller_autoseller.digiseller_client import (
     unique_code_state,
 )
 from reseller_autoseller.lot_parser import extract_product_id, is_allowed_lot_url, parse_lot_html
-from reseller_autoseller.marketplaces import normalize_marketplace, normalize_sale
-from reseller_autoseller.marketplace_chat import MarketplaceMessenger, RuntimeGgselClient
+from reseller_autoseller.marketplaces import ggsel_variant_id, normalize_marketplace, normalize_sale
+from reseller_autoseller.marketplace_chat import (
+    GgselApiError,
+    GgselOrderValidationError,
+    MarketplaceMessenger,
+    RuntimeGgselClient,
+    verified_ggsel_order_content,
+)
 from reseller_autoseller.notifications import TelegramNotifier, compact_text, sale_title
 from reseller_autoseller.runtime_config import (
     DEFAULT_ADMIN_SECRET_VALUES,
@@ -83,6 +89,10 @@ LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
 LOGIN_RATE_LIMIT_MAX_KEYS = 10000
 DIGISELLER_NAIVE_DATETIME_ZONE = timezone(timedelta(hours=3), "MSK")
+GGSEL_CHAT_RETRY_SETTING = "_ggsel_chat_retry_messages"
+GGSEL_SALES_CURSOR_INITIALIZED_SETTING = "_ggsel_sales_cursor_initialized"
+GGSEL_CHAT_POLL_INTERVAL_SECONDS = 60.0
+MARKETPLACE_POLL_LOOP_SECONDS = 20.0
 
 
 def digiseller_invoice_matches_chat(chat_invoice_id: str, code_invoice_id: str) -> bool:
@@ -157,6 +167,7 @@ def create_app() -> FastAPI:
         digiseller=digiseller,
         ggsel=ggsel,
         db=db,
+        on_error=lambda marketplace, exc: note_marketplace_message_error(marketplace, exc),
     )
     delivery_service = DeliveryService(
         db=db,
@@ -166,6 +177,7 @@ def create_app() -> FastAPI:
     )
     bot_task: asyncio.Task[Any] | None = None
     chat_task: asyncio.Task[Any] | None = None
+    ggsel_notification_task: asyncio.Task[Any] | None = None
     daily_task: asyncio.Task[Any] | None = None
     update_check_task: asyncio.Task[Any] | None = None
     bot_lock = asyncio.Lock()
@@ -178,9 +190,27 @@ def create_app() -> FastAPI:
     login_failures: dict[str, list[float]] = {}
     admin_sessions: dict[str, float] = {}
     digiseller_api_backoff_until = 0.0
+    ggsel_api_backoff_until = 0.0
+    ggsel_notification_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+    queued_ggsel_notifications: set[str] = set()
+    ggsel_sales_poll_lock = asyncio.Lock()
+    ggsel_chat_retry_messages: dict[str, str] = {}
+
+    try:
+        stored_ggsel_chat_retries = json.loads(db.get_setting(GGSEL_CHAT_RETRY_SETTING) or "{}")
+        if isinstance(stored_ggsel_chat_retries, dict):
+            ggsel_chat_retry_messages = {
+                str(order_id).strip(): str(message_id).strip()
+                for order_id, message_id in stored_ggsel_chat_retries.items()
+                if str(order_id).strip()
+            }
+    except (TypeError, ValueError):
+        log.warning("Cannot parse persisted GGsel chat retry inbox; starting with an empty inbox")
 
     if not runtime.get_text("digiseller_notification_secret"):
         db.set_setting("digiseller_notification_secret", secrets.token_urlsafe(32))
+    if not runtime.get_text("ggsel_notification_secret"):
+        db.set_setting("ggsel_notification_secret", secrets.token_urlsafe(32))
 
     def notify_admins(
         text: str,
@@ -407,7 +437,7 @@ def create_app() -> FastAPI:
                     except ValueError:
                         pass
         except Exception:
-            log.exception("Cannot parse Digiseller notification body")
+            log.exception("Cannot parse marketplace notification body")
         return payload
 
     def payload_get(payload: dict[str, Any], *keys: str) -> str:
@@ -436,6 +466,19 @@ def create_app() -> FastAPI:
             f"{base_url}/api/digiseller/notify/sale/{secret}",
             f"{base_url}/api/digiseller/notify/message/{secret}",
         )
+
+    def ggsel_notification_secret_ok(secret: str) -> bool:
+        expected = runtime.get_text("ggsel_notification_secret")
+        return bool(expected) and secrets.compare_digest(str(secret or ""), expected)
+
+    def verify_ggsel_notification_secret(secret: str) -> None:
+        if not ggsel_notification_secret_ok(secret):
+            raise HTTPException(status_code=404, detail="Not found")
+
+    def ggsel_notification_url() -> str:
+        base_url = runtime.get_text("app_base_url").rstrip("/") or "http://127.0.0.1:8095"
+        secret = runtime.get_text("ggsel_notification_secret")
+        return f"{base_url}/api/ggsel/notify/order/{secret}"
 
     def mapped_plati_products_by_id(product_id: str) -> list[dict[str, Any]]:
         selected = str(product_id or "").strip()
@@ -482,6 +525,7 @@ def create_app() -> FastAPI:
     def ggsel_order_id(payload: dict[str, Any]) -> str:
         return pick_recursive(
             payload,
+            "id_i",
             "invoice_id",
             "invoiceId",
             "invoice",
@@ -500,7 +544,13 @@ def create_app() -> FastAPI:
 
     def merge_sale_payload(summary: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
         detail_data = detail.get("data") if isinstance(detail.get("data"), dict) else {}
-        result = {**summary, **detail, **detail_data}
+        detail_content = detail.get("content") if isinstance(detail.get("content"), dict) else {}
+        nested_content = (
+            detail_data.get("content")
+            if isinstance(detail_data.get("content"), dict)
+            else {}
+        )
+        result = {**summary, **detail, **detail_data, **detail_content, **nested_content}
         result["raw_sale"] = summary
         result["raw_order"] = detail
         return result
@@ -534,9 +584,33 @@ def create_app() -> FastAPI:
         if "quota exceeded" in text or "слишком много запросов" in text:
             digiseller_api_backoff_until = max(digiseller_api_backoff_until, time.monotonic() + 60 * 60)
 
+    def ggsel_api_paused() -> bool:
+        return time.monotonic() < ggsel_api_backoff_until
+
+    def note_ggsel_api_error(exc: Exception) -> None:
+        nonlocal ggsel_api_backoff_until
+        if not isinstance(exc, GgselApiError) or not exc.retryable:
+            return
+        if exc.status_code == 429:
+            delay = exc.retry_after if exc.retry_after is not None else 60.0
+        else:
+            delay = exc.retry_after if exc.retry_after is not None else 30.0
+        ggsel_api_backoff_until = max(
+            ggsel_api_backoff_until,
+            time.monotonic() + max(1.0, min(float(delay), 86400.0)),
+        )
+
+    def note_marketplace_message_error(marketplace: str, exc: Exception) -> None:
+        if marketplace == "ggsel":
+            note_ggsel_api_error(exc)
+        elif marketplace in {"plati", "digiseller"}:
+            note_digiseller_api_error(exc)
+
     def log_poll_error(key: str, message: str, exc: Exception | None = None) -> None:
         if exc is not None and key.startswith("digiseller"):
             note_digiseller_api_error(exc)
+        if exc is not None and key.startswith("ggsel"):
+            note_ggsel_api_error(exc)
         now = time.monotonic()
         last = poll_error_notifications.get(key, 0)
         if now - last < 300:
@@ -1052,25 +1126,30 @@ def create_app() -> FastAPI:
             "⚠️ This order ID could not be verified for the current chat. Check the ID and try again.",
         )
 
-    async def process_free_reissue_command(invoice_id: str, text: str, message_key: str = "") -> bool:
+    async def process_free_reissue_command(
+        marketplace: str,
+        invoice_id: str,
+        text: str,
+        message_key: str = "",
+    ) -> bool:
         command = parse_chat_command(text)
         if not command:
             return False
         if command["command"] != delivery_service.expected_command("reissue"):
             return False
-        pending = pending_operation_for_chat("plati", invoice_id)
+        pending = pending_operation_for_chat(marketplace, invoice_id)
         if pending and str(pending["action"]) == "reissue":
             return False
         if not delivery_service.is_free_reissue_enabled():
-            await messenger.send_message("plati", invoice_id, delivery_service.render_system_text("free_reissue_disabled"))
+            await messenger.send_message(marketplace, invoice_id, delivery_service.render_system_text("free_reissue_disabled"))
             return True
         if not command["order_id"]:
-            await messenger.send_message("plati", invoice_id, delivery_service.render_system_text("free_reissue_help"))
+            await messenger.send_message(marketplace, invoice_id, delivery_service.render_system_text("free_reissue_help"))
             return True
-        if not db.marketplace_chat_owns_order("plati", invoice_id, command["order_id"]):
-            await messenger.send_message("plati", invoice_id, order_ownership_error_text())
+        if not db.marketplace_chat_owns_order(marketplace, invoice_id, command["order_id"]):
+            await messenger.send_message(marketplace, invoice_id, order_ownership_error_text())
             db.add_order_event(
-                marketplace="plati",
+                marketplace=marketplace,
                 external_order_id=invoice_id,
                 event_type="free_reissue_ownership_rejected",
                 status="warning",
@@ -1080,9 +1159,9 @@ def create_app() -> FastAPI:
         try:
             result = await delivery_service.free_reissue(
                 command["order_id"],
-                idempotency_key=f"plati:{invoice_id}:free-reissue:{message_key or command['order_id']}",
+                idempotency_key=f"{marketplace}:{invoice_id}:free-reissue:{message_key or command['order_id']}",
             )
-            if not await messenger.send_message("plati", invoice_id, str(result["delivery_text"])):
+            if not await messenger.send_message(marketplace, invoice_id, str(result["delivery_text"])):
                 raise MarketplaceMessageError("Cannot send free reissue result to marketplace chat")
             notify_admins(
                 f"🔄 <b>{tr('Бесплатный перевыпуск', 'Free reissue')}</b>\n"
@@ -1095,7 +1174,7 @@ def create_app() -> FastAPI:
             raise
         except Exception as exc:
             log.exception("Cannot process free reissue command from chat %s", invoice_id)
-            await messenger.send_message("plati", invoice_id, delivery_service.operation_error_text("reissue", exc))
+            await messenger.send_message(marketplace, invoice_id, delivery_service.operation_error_text("reissue", exc))
             notify_admins(
                 f"🚨 <b>{tr('Ошибка бесплатного перевыпуска', 'Free reissue error')}</b>\n"
                 f"{tr('Чат', 'Chat')}: <code>{escape(invoice_id)}</code>\n"
@@ -1218,6 +1297,27 @@ def create_app() -> FastAPI:
             found_order_id = extract_order_id_from_text(text)
         if not found_order_id:
             return False
+        if str(operation.get("marketplace") or "").strip().lower() == "ggsel" and not db.marketplace_chat_owns_order(
+            "ggsel",
+            str(operation.get("external_order_id") or ""),
+            found_order_id,
+        ):
+            db.add_order_event(
+                marketplace=str(operation["marketplace"]),
+                external_order_id=str(operation["external_order_id"]),
+                sale_id=int(operation["sale_id"]),
+                pending_operation_id=int(operation["id"]),
+                event_type="pending_order_ownership_rejected",
+                status="warning",
+                payload={"target_order_id": found_order_id, "action": operation["action"]},
+            )
+            if not await messenger.send_message(
+                str(operation["marketplace"]),
+                str(operation["external_order_id"]),
+                order_ownership_error_text(),
+            ):
+                raise MarketplaceMessageError("Cannot send order ownership rejection to marketplace chat")
+            return True
         try:
             db.add_order_event(
                 marketplace=str(operation["marketplace"]),
@@ -1330,7 +1430,7 @@ def create_app() -> FastAPI:
             if handled:
                 handled_signature = signature
                 continue
-            handled = await process_free_reissue_command(invoice_id, text, current_id)
+            handled = await process_free_reissue_command("plati", invoice_id, text, current_id)
             if handled:
                 handled_signature = signature
                 continue
@@ -1459,145 +1559,418 @@ def create_app() -> FastAPI:
                     },
                 )
 
-    async def poll_ggsel_sales() -> None:
-        if not ggsel.configured_for_polling():
-            return
-        cursor_key = "_last_sales"
+    async def process_ggsel_sale(sale: dict[str, Any], *, source: str) -> str:
+        """Verify and fulfill one GGSEL sale.
+
+        The return value is ``advance`` for a terminal/idempotent result and
+        ``defer`` when the sale must remain eligible for a later retry.
+        """
+
+        order_id = ggsel_order_id(sale)
+        if not order_id:
+            return "advance"
+        existing = db.get_sale_with_delivery("ggsel", order_id)
+        if (
+            existing
+            and existing.get("delivery_id")
+            and str(existing.get("marketplace_message_status") or "") == "sent"
+        ):
+            return "advance"
         try:
-            sales = await ggsel.last_sales()
-        except Exception:
-            log_poll_error("ggsel_sales", "Cannot read GGsel last sales")
-            return
-        sales = [sale for sale in sales if ggsel_order_id(sale)]
-        if not sales:
-            return
-        newest_order_id = ggsel_order_id(sales[0])
-        last_seen = db.get_chat_cursor("ggsel", cursor_key)
-        if not last_seen:
-            db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
+            detail = await ggsel.order_info(order_id)
+        except Exception as exc:
+            log_poll_error("ggsel_order_info", f"Cannot read GGsel order info for {order_id}", exc)
             db.add_order_event(
                 marketplace="ggsel",
-                external_order_id=newest_order_id,
-                event_type="polling_cursor_initialized",
-                payload={"visible_sales": len(sales)},
+                external_order_id=order_id,
+                event_type="polling_sale_failed",
+                status="error",
+                message=str(exc),
+                payload=sale,
             )
-            return
+            return "advance" if ggsel_order_error_is_permanent(exc) else "defer"
+        try:
+            verified_content = verified_ggsel_order_content(
+                sale,
+                detail,
+                seller_id=runtime.get_text("ggsel_seller_id"),
+            )
+        except GgselOrderValidationError as exc:
+            event_type = "polling_sale_rejected" if exc.permanent else "polling_sale_deferred"
+            db.add_order_event(
+                marketplace="ggsel",
+                external_order_id=order_id,
+                event_type=event_type,
+                status="error",
+                message=str(exc),
+                payload={"sale": sale, "detail": detail},
+            )
+            notify_admins(
+                f"⚠️ <b>{tr('Продажа GGsel не прошла проверку', 'GGsel sale verification failed')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return "advance" if exc.permanent else "defer"
+        payload = merge_sale_payload(sale, detail)
+        payload["external_order_id"] = order_id
+        payload["external_product_id"] = str(verified_content["item_id"]).strip()
+        payload["external_variant_id"] = ggsel_variant_id(detail)
+        try:
+            event = normalize_sale("ggsel", payload)
+        except ValueError as exc:
+            db.add_order_event(
+                marketplace="ggsel",
+                external_order_id=order_id,
+                event_type="polling_sale_skipped",
+                status="error",
+                message=str(exc),
+                payload=payload,
+            )
+            notify_admins(
+                f"⚠️ <b>{tr('Продажа GGsel пропущена: некорректные данные', 'GGsel sale skipped: invalid data')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return "advance"
+        product = db.get_product_by_external(
+            event.marketplace,
+            event.external_product_id,
+            event.external_variant_id,
+        )
+        if not product or not int(product.get("enabled", 0)):
+            reason = "Product mapping is missing or disabled; sale will be retried"
+            db.add_order_event(
+                marketplace="ggsel",
+                external_order_id=order_id,
+                event_type="polling_sale_deferred",
+                status="error",
+                message=reason,
+                payload=payload,
+            )
+            notify_admins(
+                f"⚠️ <b>{tr('Продажа GGsel без активного маппинга', 'GGsel sale has no active mapping')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                f"{tr('Товар', 'Product')}: <code>{escape(event.external_product_id)}</code>",
+                kind="errors",
+            )
+            return "defer"
+        try:
+            result = await delivery_service.handle_sale(event)
+            notify_admins(sale_notification_text(result, source=source), kind="new_purchases")
+        except DeliveryInProgressError:
+            return "defer"
+        except Exception as exc:
+            db.add_order_event(
+                marketplace="ggsel",
+                external_order_id=order_id,
+                event_type="polling_sale_failed",
+                status="error",
+                message=str(exc),
+                payload=payload,
+            )
+            notify_admins(
+                f"🚨 <b>{tr('Ошибка обработки продажи GGsel', 'GGsel sale processing error')}</b>\n"
+                f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
+                f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
+                kind="errors",
+            )
+            return "defer"
+        return "advance"
 
-        pending_sales = []
-        for sale in sales:
-            order_id = ggsel_order_id(sale)
-            if order_id == last_seen:
-                break
-            pending_sales.append(sale)
-        if not pending_sales:
+    async def poll_ggsel_sales() -> None:
+        if not ggsel.configured_for_polling() or ggsel_api_paused():
             return
-
-        cursor_candidate = last_seen
-        can_advance_cursor = True
-        for sale in reversed(pending_sales):
-            order_id = ggsel_order_id(sale)
-            existing = db.get_sale_with_delivery("ggsel", order_id)
-            if (
-                existing
-                and existing.get("delivery_id")
-                and str(existing.get("marketplace_message_status") or "") == "sent"
-            ):
-                if can_advance_cursor:
-                    cursor_candidate = order_id
-                continue
+        async with ggsel_sales_poll_lock:
+            cursor_key = "_last_sales"
             try:
-                detail = await ggsel.order_info(order_id)
+                sales = await ggsel.last_sales()
             except Exception as exc:
-                log_poll_error("ggsel_order_info", f"Cannot read GGsel order info for {order_id}")
+                log_poll_error("ggsel_sales", "Cannot read GGsel last sales", exc)
+                return
+            sales = [sale for sale in sales if ggsel_order_id(sale)]
+            last_seen = db.get_chat_cursor("ggsel", cursor_key) or ""
+            cursor_initialized = db.get_setting(GGSEL_SALES_CURSOR_INITIALIZED_SETTING) == "1"
+            if not cursor_initialized and last_seen:
+                # Upgrade databases that already have a pre-v0.3 cursor without
+                # re-running bootstrap behavior.
+                db.set_setting(GGSEL_SALES_CURSOR_INITIALIZED_SETTING, "1")
+                cursor_initialized = True
+            if not cursor_initialized:
+                # Fail closed on a new/restored database: the seller endpoint can
+                # return up to 100 historical sales and those must never trigger
+                # fresh wholesale purchases. A separate marker distinguishes an
+                # initialized seller with zero sales from an uninitialized DB.
+                newest_order_id = ggsel_order_id(sales[0]) if sales else ""
+                if newest_order_id:
+                    db.set_chat_cursor("ggsel", cursor_key, newest_order_id)
+                db.set_setting(GGSEL_SALES_CURSOR_INITIALIZED_SETTING, "1")
                 db.add_order_event(
                     marketplace="ggsel",
-                    external_order_id=order_id,
-                    event_type="polling_sale_failed",
-                    status="error",
-                    message=str(exc),
-                    payload=sale,
+                    external_order_id=newest_order_id or "_bootstrap",
+                    event_type="polling_cursor_bootstrapped",
+                    payload={"visible_sales": len(sales), "watermark_present": bool(newest_order_id)},
                 )
-                if ggsel_order_error_is_permanent(exc):
+                return
+            if not sales:
+                return
+            newest_order_id = ggsel_order_id(sales[0])
+            if not last_seen:
+                # The initialized marker records that the previous successful poll
+                # observed no sales, so every currently visible sale is new.
+                pending_sales = sales
+            else:
+                pending_sales = []
+                for sale in sales:
+                    order_id = ggsel_order_id(sale)
+                    if order_id == last_seen:
+                        break
+                    pending_sales.append(sale)
+            if not pending_sales:
+                return
+
+            cursor_candidate = last_seen
+            can_advance_cursor = True
+            for sale in reversed(pending_sales):
+                order_id = ggsel_order_id(sale)
+                outcome = await process_ggsel_sale(sale, source="GGsel polling")
+                if outcome == "advance":
                     if can_advance_cursor:
                         cursor_candidate = order_id
-                    continue
-                can_advance_cursor = False
-                continue
-            payload = merge_sale_payload(sale, detail)
+                else:
+                    can_advance_cursor = False
+            if cursor_candidate != last_seen:
+                db.set_chat_cursor("ggsel", cursor_key, cursor_candidate)
+
+    def enqueue_ggsel_notification(order_id: str = "") -> bool:
+        key = str(order_id or "_wake").strip() or "_wake"
+        if key in queued_ggsel_notifications:
+            return False
+        try:
+            ggsel_notification_queue.put_nowait(key)
+        except asyncio.QueueFull:
+            log.warning("GGsel notification queue is full; periodic polling remains active")
+            return False
+        queued_ggsel_notifications.add(key)
+        return True
+
+    async def process_ggsel_notifications() -> None:
+        while True:
+            key = await ggsel_notification_queue.get()
+            batch = {key}
             try:
-                event = normalize_sale("ggsel", payload)
-            except ValueError as exc:
-                db.add_order_event(
-                    marketplace="ggsel",
-                    external_order_id=order_id,
-                    event_type="polling_sale_skipped",
-                    status="error",
-                    message=str(exc),
-                    payload=payload,
-                )
-                notify_admins(
-                    f"⚠️ <b>{tr('Продажа GGsel пропущена: некорректные данные', 'GGsel sale skipped: invalid data')}</b>\n"
-                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
-                    f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
-                    kind="errors",
-                )
-                if can_advance_cursor:
-                    cursor_candidate = order_id
-                continue
-            product = db.get_product_by_external(
-                event.marketplace,
-                event.external_product_id,
-                event.external_variant_id,
+                while True:
+                    batch.add(ggsel_notification_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                pass
+            finally:
+                for queued_key in batch:
+                    queued_ggsel_notifications.discard(queued_key)
+                    ggsel_notification_queue.task_done()
+
+            # GGSEL does not document callback timing or payload guarantees. Treat
+            # it only as a wake-up signal and verify orders through the seller API.
+            # Two short retries cover the common case where last-sales visibility
+            # lags slightly behind the callback; the 5-minute poll remains fallback.
+            known_order_ids = {item for item in batch if item != "_wake"}
+            for delay in (0, 3):
+                if delay:
+                    await asyncio.sleep(delay)
+                await poll_ggsel_sales()
+                if known_order_ids and all(
+                    (row := db.get_sale_with_delivery("ggsel", order_id))
+                    and row.get("delivery_id")
+                    and str(row.get("marketplace_message_status") or "") == "sent"
+                    for order_id in known_order_ids
+                ):
+                    break
+
+    def ggsel_unread_count(chat: dict[str, Any]) -> int | None:
+        value = pick_recursive(chat, "cnt_new", "unread_count", "new_messages", "count_new")
+        if not value:
+            return None
+        try:
+            return max(0, int(value))
+        except ValueError:
+            return None
+
+    def ggsel_message_is_explicitly_unread(message: dict[str, Any]) -> bool:
+        lowered = {str(key).lower(): value for key, value in message.items()}
+        for key in ("is_new", "new", "unread", "is_unread"):
+            if key in lowered:
+                return str(lowered[key]).strip().lower() in {"1", "true", "yes"}
+        for key in ("read", "is_read", "seen", "is_seen"):
+            if key in lowered:
+                return str(lowered[key]).strip().lower() in {"0", "false", "no"}
+        return False
+
+    def ggsel_messages_chronological(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = list(messages)
+        numeric_ids = [message_id(message) for message in ordered]
+        if ordered and all(value.isdigit() for value in numeric_ids):
+            ordered.sort(key=lambda message: int(message_id(message)))
+        return ordered
+
+    def ggsel_unread_messages(
+        messages: list[dict[str, Any]],
+        unread_count: int | None,
+    ) -> list[dict[str, Any]]:
+        messages = ggsel_messages_chronological(messages)
+        if unread_count is not None:
+            return messages[-unread_count:] if unread_count > 0 else []
+        explicitly_unread = [message for message in messages if ggsel_message_is_explicitly_unread(message)]
+        if explicitly_unread:
+            return explicitly_unread
+        # The endpoint itself returns only chats with unread buyer activity, but
+        # the response schema does not guarantee cnt_new. In that rare shape,
+        # process only the newest message instead of replaying the whole history.
+        return messages[-1:] if messages else []
+
+    def persist_ggsel_chat_retries() -> None:
+        db.set_setting(
+            GGSEL_CHAT_RETRY_SETTING,
+            json.dumps(ggsel_chat_retry_messages, ensure_ascii=False, sort_keys=True),
+        )
+
+    def set_ggsel_chat_retry(order_id: str, message_id_to_retry: str) -> None:
+        selected_order_id = str(order_id or "").strip()
+        if not selected_order_id:
+            return
+        selected_message_id = str(message_id_to_retry or "_latest").strip() or "_latest"
+        if ggsel_chat_retry_messages.get(selected_order_id) == selected_message_id:
+            return
+        ggsel_chat_retry_messages[selected_order_id] = selected_message_id
+        persist_ggsel_chat_retries()
+
+    def clear_ggsel_chat_retry(order_id: str) -> None:
+        if ggsel_chat_retry_messages.pop(str(order_id or "").strip(), None) is not None:
+            persist_ggsel_chat_retries()
+
+    def ggsel_messages_after_cursor(
+        messages: list[dict[str, Any]],
+        cursor: str,
+    ) -> list[dict[str, Any]] | None:
+        selected_cursor = str(cursor or "").strip()
+        if not selected_cursor:
+            return None
+        for index, message in enumerate(messages):
+            if message_id(message) == selected_cursor:
+                return messages[index + 1 :]
+        return None
+
+    def ggsel_messages_from_retry(
+        messages: list[dict[str, Any]],
+        retry_message_id: str,
+        unread_count: int | None,
+    ) -> list[dict[str, Any]] | None:
+        selected_retry = str(retry_message_id or "").strip()
+        if not selected_retry:
+            return None
+        if selected_retry == "_latest":
+            return ggsel_unread_messages(messages, unread_count)
+        for index, message in enumerate(messages):
+            if message_id(message) == selected_retry:
+                return messages[index:]
+        return None
+
+    async def poll_ggsel_unread_chats() -> None:
+        if not ggsel.configured_for_polling() or ggsel_api_paused():
+            return
+        try:
+            chats = await ggsel.unread_chats()
+        except Exception as exc:
+            log_poll_error("ggsel_unread_chats", "Cannot read GGsel unread chats", exc)
+            return
+        work_items: dict[str, int | None] = {
+            order_id: None for order_id in ggsel_chat_retry_messages
+        }
+        for chat in chats:
+            order_id = chat_invoice_id(chat) or pick_recursive(
+                chat,
+                "id_i",
+                "invoice_id",
+                "inv",
+                "order_id",
             )
-            if not product or not int(product.get("enabled", 0)):
-                reason = "Product mapping is missing or disabled; sale will be retried"
-                db.add_order_event(
-                    marketplace="ggsel",
-                    external_order_id=order_id,
-                    event_type="polling_sale_deferred",
-                    status="error",
-                    message=reason,
-                    payload=payload,
-                )
-                notify_admins(
-                    f"⚠️ <b>{tr('Продажа GGsel без активного маппинга', 'GGsel sale has no active mapping')}</b>\n"
-                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
-                    f"{tr('Товар', 'Product')}: <code>{escape(event.external_product_id)}</code>",
-                    kind="errors",
-                )
-                can_advance_cursor = False
+            unread_count = ggsel_unread_count(chat)
+            if not order_id or (unread_count == 0 and order_id not in ggsel_chat_retry_messages):
                 continue
+            work_items[order_id] = unread_count
+        for order_id, unread_count in work_items.items():
+            if ggsel_api_paused():
+                break
             try:
-                result = await delivery_service.handle_sale(event)
-                notify_admins(sale_notification_text(result, source="GGsel polling"), kind="new_purchases")
-            except DeliveryInProgressError:
-                can_advance_cursor = False
-                continue
+                messages = await ggsel.order_messages(order_id)
             except Exception as exc:
-                db.add_order_event(
-                    marketplace="ggsel",
-                    external_order_id=order_id,
-                    event_type="polling_sale_failed",
-                    status="error",
-                    message=str(exc),
-                    payload=payload,
+                log_poll_error(
+                    f"ggsel_messages:{order_id}",
+                    f"Cannot read GGsel messages for {order_id}",
+                    exc,
                 )
-                notify_admins(
-                    f"🚨 <b>{tr('Ошибка обработки продажи GGsel', 'GGsel sale processing error')}</b>\n"
-                    f"{tr('Заказ', 'Order')}: <code>{escape(order_id)}</code>\n"
-                    f"{tr('Ошибка', 'Error')}: <code>{escape(str(exc))}</code>",
-                    kind="errors",
-                )
-                can_advance_cursor = False
+                set_ggsel_chat_retry(order_id, ggsel_chat_retry_messages.get(order_id, "_latest"))
                 continue
-            if can_advance_cursor:
-                cursor_candidate = order_id
-        if cursor_candidate != last_seen:
-            db.set_chat_cursor("ggsel", cursor_key, cursor_candidate)
+            ordered_messages = ggsel_messages_chronological(messages)
+            retry_message_id = ggsel_chat_retry_messages.get(order_id, "")
+            selected_messages = ggsel_messages_after_cursor(
+                ordered_messages,
+                db.get_chat_cursor("ggsel", order_id),
+            )
+            if selected_messages is None and retry_message_id:
+                selected_messages = ggsel_messages_from_retry(
+                    ordered_messages,
+                    retry_message_id,
+                    unread_count,
+                )
+                if selected_messages is None:
+                    log_poll_error(
+                        f"ggsel_retry_message_missing:{order_id}",
+                        f"Cannot find persisted GGsel retry message for {order_id}",
+                    )
+                    continue
+            if selected_messages is None:
+                selected_messages = ggsel_unread_messages(ordered_messages, unread_count)
+            failed = False
+            for message in selected_messages:
+                current_id = message_id(message)
+                text = message_text(message)
+                set_ggsel_chat_retry(order_id, current_id or "_latest")
+                try:
+                    row, _created = save_remote_chat_message(
+                        marketplace="ggsel",
+                        external_order_id=order_id,
+                        payload=message,
+                        text=text,
+                        remote_id=current_id,
+                        source="ggsel_api",
+                    )
+                    if str(row.get("role") or "") == "buyer" and text:
+                        handled = await process_subscription_status_command("ggsel", order_id, text)
+                        if not handled:
+                            handled = await process_free_reissue_command("ggsel", order_id, text, current_id)
+                        if not handled:
+                            await process_pending_operation_message("ggsel", order_id, text)
+                except Exception as exc:
+                    log_poll_error(
+                        f"ggsel_message_process:{order_id}",
+                        f"Cannot process GGsel message for {order_id}",
+                        exc,
+                    )
+                    failed = True
+                    break
+                if current_id:
+                    db.set_chat_cursor("ggsel", order_id, current_id)
+                    operation = pending_operation_for_chat("ggsel", order_id)
+                    if operation:
+                        db.update_pending_last_message(int(operation["id"]), current_id)
+            if not failed:
+                clear_ggsel_chat_retry(order_id)
 
     async def poll_marketplace_chats() -> None:
         last_digiseller_fallback_poll = 0.0
         last_unclaimed_unique_code_poll = 0.0
+        last_ggsel_sales_fallback_poll = 0.0
+        last_ggsel_chat_poll = 0.0
         while True:
             try:
                 for operation in db.recover_stale_pending_operations():
@@ -1631,14 +2004,22 @@ def create_app() -> FastAPI:
                 if now_monotonic - last_unclaimed_unique_code_poll >= 600:
                     last_unclaimed_unique_code_poll = now_monotonic
                     await poll_digiseller_unclaimed_unique_code_sales()
-                await poll_ggsel_sales()
+                ggsel_fallback_interval = runtime.get_float(
+                    "ggsel_sales_polling_fallback_interval_seconds"
+                )
+                if now_monotonic - last_ggsel_sales_fallback_poll >= ggsel_fallback_interval:
+                    last_ggsel_sales_fallback_poll = now_monotonic
+                    await poll_ggsel_sales()
+                if now_monotonic - last_ggsel_chat_poll >= GGSEL_CHAT_POLL_INTERVAL_SECONDS:
+                    last_ggsel_chat_poll = now_monotonic
+                    await poll_ggsel_unread_chats()
                 for operation in db.list_pending_operations():
                     if not marketplace_messages_configured(str(operation["marketplace"])):
                         continue
                     # DigiSeller pending replies are handled by the message webhook.
                     # The optional fallback reads only the unread-chat list above,
                     # never every pending chat on every 20-second loop.
-                    if str(operation["marketplace"]) in {"plati", "digiseller"}:
+                    if str(operation["marketplace"]) in {"plati", "digiseller", "ggsel"}:
                         continue
                     messages = await messenger.order_messages(
                         str(operation["marketplace"]),
@@ -1785,7 +2166,7 @@ def create_app() -> FastAPI:
                 raise
             except Exception:
                 log.exception("Marketplace chat polling failed")
-            await asyncio.sleep(20)
+            await asyncio.sleep(MARKETPLACE_POLL_LOOP_SECONDS)
 
     def telegram_status() -> dict[str, Any]:
         return {
@@ -1867,11 +2248,12 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal chat_task, daily_task, update_check_task
+        nonlocal chat_task, ggsel_notification_task, daily_task, update_check_task
         db.init()
         async with bot_lock:
             await start_telegram_bot()
         chat_task = asyncio.create_task(poll_marketplace_chats())
+        ggsel_notification_task = asyncio.create_task(process_ggsel_notifications())
         daily_task = asyncio.create_task(daily_statistics_loop())
         update_check_task = asyncio.create_task(update_check_loop())
         yield
@@ -1885,6 +2267,12 @@ def create_app() -> FastAPI:
             daily_task.cancel()
             try:
                 await daily_task
+            except asyncio.CancelledError:
+                pass
+        if ggsel_notification_task:
+            ggsel_notification_task.cancel()
+            try:
+                await ggsel_notification_task
             except asyncio.CancelledError:
                 pass
         if update_check_task:
@@ -2183,7 +2571,7 @@ def create_app() -> FastAPI:
             handled = await process_subscription_status_command("plati", invoice_id, text)
             handled_action = "status" if handled else ""
         if not handled:
-            handled = await process_free_reissue_command(invoice_id, text, message_id)
+            handled = await process_free_reissue_command("plati", invoice_id, text, message_id)
             handled_action = "free_reissue" if handled else ""
         if not handled:
             handled = await process_pending_operation_message("plati", invoice_id, text)
@@ -2191,6 +2579,31 @@ def create_app() -> FastAPI:
         if message_id:
             db.set_chat_cursor("plati", invoice_id, message_id)
         return {"status": "ok", "handled": handled, "action": handled_action}
+
+    @app.api_route("/api/ggsel/notify/order/{secret}", methods=["GET", "POST"])
+    async def ggsel_order_notification(secret: str, request: Request) -> dict[str, Any]:
+        verify_ggsel_notification_secret(secret)
+        if not runtime.get_bool("ggsel_sale_notifications_enabled"):
+            return {"status": "ignored", "reason": "order notifications disabled"}
+        payload = await notification_payload(request)
+        order_id = ggsel_order_id(payload)
+        queued = enqueue_ggsel_notification(order_id)
+        db.add_order_event(
+            marketplace="ggsel",
+            external_order_id=order_id or "_notification",
+            event_type="ggsel_order_notification_received",
+            status="info",
+            payload={
+                "order_id_present": bool(order_id),
+                "payload_keys": sorted(str(key) for key in payload)[:50],
+                "queued": queued,
+            },
+        )
+        return {
+            "status": "accepted",
+            "queued": queued,
+            "order_id_present": bool(order_id),
+        }
 
     @app.post("/admin/api/login")
     async def admin_login(request: Request, payload: LoginIn) -> dict[str, str]:
@@ -2235,6 +2648,17 @@ def create_app() -> FastAPI:
             "message_notifications_enabled": runtime.get_bool("digiseller_message_notifications_enabled"),
             "sha256_validation_enabled": runtime.get_bool("digiseller_validate_sale_sha256"),
             "polling_fallback_enabled": runtime.get_bool("digiseller_polling_fallback_enabled"),
+        }
+
+    @app.get("/admin/api/ggsel/notification-url", dependencies=[Depends(require_admin)])
+    async def admin_ggsel_notification_url() -> dict[str, Any]:
+        return {
+            "url": ggsel_notification_url(),
+            "method": "POST",
+            "sale_notifications_enabled": runtime.get_bool("ggsel_sale_notifications_enabled"),
+            "polling_fallback_interval_seconds": runtime.get_float(
+                "ggsel_sales_polling_fallback_interval_seconds"
+            ),
         }
 
     @app.get("/admin/api/system", dependencies=[Depends(require_admin)])
