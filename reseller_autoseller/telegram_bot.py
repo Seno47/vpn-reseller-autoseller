@@ -515,10 +515,20 @@ def parse_user_payload(text: str) -> tuple[int, str]:
     return int(parts[0]), parts[1].strip() if len(parts) == 2 else ""
 
 
-async def answer_or_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+async def answer_or_edit(
+    callback: CallbackQuery,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+    *,
+    answer_callback: bool = True,
+) -> None:
+    # Stop Telegram's callback loading indicator before the edit request.  The
+    # edit can be noticeably slower (or fail when the message is unchanged),
+    # but acknowledging the tap should never wait for it.
+    if answer_callback:
+        await callback.answer()
     if callback.message:
         await callback.message.edit_text(text, reply_markup=markup)
-    await callback.answer()
 
 
 def aiogram_markup(payload: dict[str, Any]) -> InlineKeyboardMarkup:
@@ -621,7 +631,10 @@ def build_dispatcher(
     chat_messenger = messenger or MarketplaceMessenger(digiseller=digiseller, db=db)
 
     def is_admin(telegram_id: int | None) -> bool:
-        return bool(telegram_id and runtime.is_bot_admin(telegram_id))
+        return bool(
+            telegram_id
+            and (runtime.is_env_admin(telegram_id) or runtime.is_bot_admin(telegram_id))
+        )
 
     def is_owner(telegram_id: int | None) -> bool:
         return bool(telegram_id and runtime.is_env_admin(telegram_id))
@@ -658,14 +671,18 @@ def build_dispatcher(
     @router.callback_query(F.data == "menu:home")
     async def home(callback: CallbackQuery) -> None:
         uid = user_id(callback)
-        language = runtime_language(runtime)
         if not is_admin(uid):
             await deny_callback(callback)
             return
+        # Owners are authorized from the in-memory environment above, so the
+        # callback can be acknowledged before any SQLite-backed config read.
+        await callback.answer()
+        language = runtime_language(runtime)
         await answer_or_edit(
             callback,
             f"✨ <b>XyraNet Reseller Autoseller</b>\n{tr(language, 'Выберите действие:', 'Choose an action:')}",
             main_menu(is_owner(uid), language),
+            answer_callback=False,
         )
 
     def chat_anchor(message_id: int) -> dict[str, Any] | None:
@@ -1688,7 +1705,7 @@ def build_dispatcher(
         await answer_or_edit(callback, text, back_menu(language))
 
     @router.callback_query(F.data == "menu:products")
-    async def products(callback: CallbackQuery) -> None:
+    async def products(callback: CallbackQuery, *, answer_callback: bool = True) -> None:
         uid = user_id(callback)
         language = runtime_language(runtime)
         if not is_admin(uid):
@@ -1696,7 +1713,12 @@ def build_dispatcher(
             return
         rows = db.list_products()
         if not rows:
-            await answer_or_edit(callback, tr(language, "🧾 Маппингов пока нет.", "🧾 No mappings yet."), back_menu(language))
+            await answer_or_edit(
+                callback,
+                tr(language, "🧾 Маппингов пока нет.", "🧾 No mappings yet."),
+                back_menu(language),
+                answer_callback=answer_callback,
+            )
             return
         lines = [f"🧾 <b>{tr(language, 'Товары', 'Products')}</b>"]
         buttons = []
@@ -1709,7 +1731,12 @@ def build_dispatcher(
             next_state = "0" if int(item["enabled"]) else "1"
             buttons.append([InlineKeyboardButton(text=f"#{item['id']} {state}", callback_data=f"product:toggle:{item['id']}:{next_state}")])
         buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
-        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+        await answer_or_edit(
+            callback,
+            "\n".join(lines),
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+            answer_callback=answer_callback,
+        )
 
     @router.callback_query(F.data.startswith("product:toggle:"))
     async def toggle_product(callback: CallbackQuery) -> None:
@@ -1720,10 +1747,10 @@ def build_dispatcher(
         _, _, product_id, enabled = (callback.data or "").split(":")
         db.set_product_enabled(int(product_id), enabled == "1")
         await callback.answer(tr(runtime_language(runtime), "✅ Готово", "✅ Done"))
-        await products(callback)
+        await products(callback, answer_callback=False)
 
     @router.callback_query(F.data == "menu:templates")
-    async def templates(callback: CallbackQuery) -> None:
+    async def templates(callback: CallbackQuery, *, answer_callback: bool = True) -> None:
         uid = user_id(callback)
         language = runtime_language(runtime)
         if not is_admin(uid):
@@ -1743,6 +1770,7 @@ def build_dispatcher(
             callback,
             f"📝 <b>{tr(language, 'Шаблоны', 'Templates')}</b>\n{tr(language, 'Выберите вид действия.', 'Choose an action type.')}",
             InlineKeyboardMarkup(inline_keyboard=buttons),
+            answer_callback=answer_callback,
         )
 
     @router.callback_query(F.data.startswith("template:group:"))
@@ -1819,7 +1847,7 @@ def build_dispatcher(
             return
         db.set_setting(delivery_template_key(action), "")
         await callback.answer(tr(language, "✅ Шаблон сброшен", "✅ Template reset"))
-        await templates(callback)
+        await templates(callback, answer_callback=False)
 
     @router.callback_query(F.data == "menu:sales")
     async def sales(callback: CallbackQuery) -> None:
@@ -1939,7 +1967,7 @@ def build_dispatcher(
         )
 
     @router.callback_query(F.data == "menu:users")
-    async def users(callback: CallbackQuery) -> None:
+    async def users(callback: CallbackQuery, *, answer_callback: bool = True) -> None:
         uid = user_id(callback)
         language = runtime_language(runtime)
         if not is_admin(uid):
@@ -1961,7 +1989,12 @@ def build_dispatcher(
         if owner:
             buttons.append([InlineKeyboardButton(text=tr(language, "➕ Добавить пользователя", "➕ Add user"), callback_data="user:add")])
         buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
-        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+        await answer_or_edit(
+            callback,
+            "\n".join(lines),
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+            answer_callback=answer_callback,
+        )
 
     @router.callback_query(F.data == "user:add")
     async def user_add(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2012,10 +2045,10 @@ def build_dispatcher(
             return
         db.delete_bot_user(telegram_id)
         await callback.answer(tr(language, "🗑 Удалён", "🗑 Removed"))
-        await users(callback)
+        await users(callback, answer_callback=False)
 
     @router.callback_query(F.data == "menu:settings")
-    async def settings_menu(callback: CallbackQuery) -> None:
+    async def settings_menu(callback: CallbackQuery, *, answer_callback: bool = True) -> None:
         uid = user_id(callback)
         language = runtime_language(runtime)
         if not is_owner(uid):
@@ -2043,7 +2076,12 @@ def build_dispatcher(
         if restart_bot:
             buttons.append([InlineKeyboardButton(text=tr(language, "🔄 Перезапустить Telegram-бота", "🔄 Restart Telegram bot"), callback_data="bot:restart")])
         buttons.append([InlineKeyboardButton(text=tr(language, "⬅️ Назад", "⬅️ Back"), callback_data="menu:home")])
-        await answer_or_edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+        await answer_or_edit(
+            callback,
+            "\n".join(lines),
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+            answer_callback=answer_callback,
+        )
 
     @router.callback_query(F.data == "bot:restart")
     async def bot_restart(callback: CallbackQuery) -> None:
@@ -2073,7 +2111,7 @@ def build_dispatcher(
         if definition.kind == "boolean":
             runtime.set_value(key, not runtime.get_bool(key))
             await callback.answer(tr(language, "✅ Переключено", "✅ Switched"))
-            await settings_menu(callback)
+            await settings_menu(callback, answer_callback=False)
             return
         if definition.kind == "select":
             options = [
@@ -2112,7 +2150,7 @@ def build_dispatcher(
             await callback.answer(f"⚠️ {detail}", show_alert=True)
             return
         await callback.answer(tr(language, "✅ Сохранено", "✅ Saved"))
-        await settings_menu(callback)
+        await settings_menu(callback, answer_callback=False)
 
     @router.message(SettingState.waiting_value)
     async def setting_value(message: Message, state: FSMContext) -> None:
